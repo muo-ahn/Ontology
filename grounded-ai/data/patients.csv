@@ -1,0 +1,6 @@
+patient_id,name,sex,birth_date,region
+P1001,Patient_1001,F,1975-10-27,Seoul
+P1002,Patient_1002,M,2008-09-30,Seoul
+P1003,Patient_1003,M,1985-11-21,Daegu
+P1004,Patient_1004,M,2007-08-12,Incheon
+P1005,Patient_1005,F,1991-06-02,Seoul

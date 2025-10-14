@@ -1,0 +1,5 @@
+med_id,encounter_id,patient_id,drug_name,for_icd10,dose,schedule
+M00001,E0003,P1002,amlodipine,I10,20mg,qd
+M00002,E0005,P1003,azithromycin,J18.9,5mg,tid
+M00003,E0006,P1004,atorvastatin,E78.5,20mg,tid
+M00004,E0008,P1005,azithromycin,J18.9,10mg,qd

@@ -1,0 +1,4 @@
+inference_id,image_id,model,task,output,confidence,timestamp
+AI00001,IMG001,llava-1.5-7b,caption,Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.,0.91,2025-10-10T12:00:00
+AI00002,IMG002,llava-1.5-7b,caption,Abdominal ultrasound – fatty liver pattern. No gallstones visualized.,0.85,2025-10-10T12:00:00
+AI00003,IMG003,qwen2-vl:2b,caption,"ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.",0.79,2025-10-10T12:00:00

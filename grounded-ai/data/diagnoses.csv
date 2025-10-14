@@ -1,0 +1,11 @@
+diagnosis_id,encounter_id,patient_id,icd10,description
+D00001,E0001,P1001,I10,Essential (primary) hypertension
+D00002,E0001,P1001,E11,Type 2 diabetes mellitus
+D00003,E0002,P1001,E78.5,Hyperlipidemia
+D00004,E0003,P1002,Z00.0,General medical examination
+D00005,E0003,P1002,I10,Essential (primary) hypertension
+D00006,E0005,P1003,E78.5,Hyperlipidemia
+D00007,E0005,P1003,I10,Essential (primary) hypertension
+D00008,E0006,P1004,E78.5,Hyperlipidemia
+D00009,E0008,P1005,Z00.0,General medical examination
+D00010,E0009,P1005,J18.9,"Pneumonia, unspecified organism"

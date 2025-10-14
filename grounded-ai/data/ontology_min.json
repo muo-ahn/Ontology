@@ -1,0 +1,119 @@
+{
+  "entities": {
+    "Patient": {
+      "pk": "patient_id",
+      "props": [
+        "name",
+        "sex",
+        "birth_date",
+        "region"
+      ]
+    },
+    "Encounter": {
+      "pk": "encounter_id",
+      "props": [
+        "encounter_type",
+        "start_time",
+        "end_time"
+      ],
+      "links": {
+        "PATIENT": "patient_id→Patient.patient_id"
+      }
+    },
+    "Observation": {
+      "pk": "observation_id",
+      "props": [
+        "loinc_code",
+        "name",
+        "value",
+        "unit",
+        "timestamp"
+      ],
+      "links": {
+        "PATIENT": "patient_id→Patient.patient_id",
+        "ENCOUNTER": "encounter_id→Encounter.encounter_id"
+      }
+    },
+    "Diagnosis": {
+      "pk": "diagnosis_id",
+      "props": [
+        "icd10",
+        "description"
+      ],
+      "links": {
+        "PATIENT": "patient_id→Patient.patient_id",
+        "ENCOUNTER": "encounter_id→Encounter.encounter_id"
+      }
+    },
+    "Medication": {
+      "pk": "med_id",
+      "props": [
+        "drug_name",
+        "for_icd10",
+        "dose",
+        "schedule"
+      ],
+      "links": {
+        "PATIENT": "patient_id→Patient.patient_id",
+        "ENCOUNTER": "encounter_id→Encounter.encounter_id"
+      }
+    },
+    "Image": {
+      "pk": "image_id",
+      "props": [
+        "modality",
+        "file_path",
+        "caption_hint"
+      ],
+      "links": {
+        "PATIENT": "patient_id→Patient.patient_id",
+        "ENCOUNTER": "encounter_id→Encounter.encounter_id"
+      }
+    },
+    "AIInference": {
+      "pk": "inference_id",
+      "props": [
+        "model",
+        "task",
+        "output",
+        "confidence",
+        "timestamp"
+      ],
+      "links": {
+        "IMAGE": "image_id→Image.image_id"
+      }
+    }
+  },
+  "relationships": [
+    {
+      "from": "Patient",
+      "to": "Encounter",
+      "type": "HAS_ENCOUNTER"
+    },
+    {
+      "from": "Encounter",
+      "to": "Observation",
+      "type": "HAS_OBS"
+    },
+    {
+      "from": "Encounter",
+      "to": "Diagnosis",
+      "type": "HAS_DX"
+    },
+    {
+      "from": "Encounter",
+      "to": "Medication",
+      "type": "HAS_RX"
+    },
+    {
+      "from": "Encounter",
+      "to": "Image",
+      "type": "HAS_IMAGE"
+    },
+    {
+      "from": "Image",
+      "to": "AIInference",
+      "type": "HAS_INFERENCE"
+    }
+  ]
+}

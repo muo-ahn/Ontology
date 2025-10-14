@@ -1,0 +1,50 @@
+# Ontology + vLM + LLM Local Prototype
+
+## Overview
+- Prototype playground for experimenting with a hybrid Ontology + vLM + LLM stack purely on a local workstation.
+- Target hardware: RTX 4070 Laptop GPU and Apple Silicon (M4) with Metal acceleration.
+- Goal: validate the end-to-end orchestration flow (Streamlit UI → FastAPI → vLM → LLM → Neo4j/Qdrant) against a controlled medical dummy dataset.
+
+## System Architecture
+```
+[Streamlit UI] → [FastAPI Orchestrator]
+   ├─ vLM: Qwen2-VL / MiniCPM-V / LLaVA (captioning & VQA)
+   ├─ LLM: Qwen2.5-7B-Instruct (Ollama)
+   ├─ KG : Neo4j (Ontology-backed knowledge graph)
+   └─ VecDB: Qdrant (text & image embedding search)
+```
+
+## Dummy Dataset (`/mnt/data/medical_dummy`)
+| File              | Description                                             |
+|-------------------|---------------------------------------------------------|
+| `patients.csv`    | Patient demographics (sex, region, birth date, etc.)    |
+| `encounters.csv`  | Inpatient/outpatient encounter history                  |
+| `observations.csv`| LOINC-aligned lab and observation results               |
+| `diagnoses.csv`   | ICD-10 diagnosis codes per encounter                    |
+| `medications.csv` | Prescribed medications                                  |
+| `imaging.csv`     | Imaging metadata and caption overlays                   |
+| `ai_inference.csv`| vLM/LLM inference outputs linked to imaging             |
+| `ontology_min.json`| Minimal ontology schema snapshot                       |
+| `seed.cypher`     | Neo4j seed script for bootstrapping the knowledge graph |
+
+## Ontology Snapshot
+- **Entities**: Patient, Encounter, Observation, Diagnosis, Medication, Image, AIInference.
+- **Relationships**:
+  - `(Patient)-[:HAS_ENCOUNTER]->(Encounter)`
+  - `(Encounter)-[:HAS_OBS]->(Observation)`
+  - `(Encounter)-[:HAS_DX]->(Diagnosis)`
+  - `(Encounter)-[:HAS_RX]->(Medication)`
+  - `(Encounter)-[:HAS_IMAGE]->(Image)`
+  - `(Image)-[:HAS_INFERENCE]->(AIInference)`
+
+## Experiment Playbook
+1. **vLM prompt**: “Summarize the key findings in this X-ray.”
+2. **LLM reasoning**: “What follow-up tests should this patient receive?”
+3. **Ontology update**: Persist vLM → LLM outputs to Neo4j and expand the graph.
+4. **Composite query**: “Find hypertensive patients (I10) from the last 60 days with SBP > 140 who received antihypertensive medication.”
+
+## Next Steps
+- Import CSVs into Neo4j and execute `seed.cypher`.
+- Wire the vLM → LLM → Ontology pipeline inside the FastAPI orchestrator.
+- Build the Streamlit front end for image upload plus Q&A workflows.
+- Iterate locally with Codex-driven orchestration code and prompt experiments.

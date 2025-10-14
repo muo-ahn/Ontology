@@ -1,0 +1,4 @@
+image_id,patient_id,encounter_id,modality,caption_hint,file_path
+IMG001,P1002,E0009,XR,Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.,/mnt/data/medical_dummy/images/img_001.png
+IMG002,P1005,E0006,ECG,Abdominal ultrasound – fatty liver pattern. No gallstones visualized.,/mnt/data/medical_dummy/images/img_002.png
+IMG003,P1001,E0005,XR,"ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.",/mnt/data/medical_dummy/images/img_003.png
