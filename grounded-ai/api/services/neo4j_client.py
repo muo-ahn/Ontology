@@ -38,7 +38,7 @@ class Neo4jClient:
         if self._driver is None:
             raise RuntimeError("Neo4j driver not initialised")
 
-        async def _work() -> List[Dict[str, Any]]:
+        def _work() -> List[Dict[str, Any]]:
             driver = self._driver
             assert driver is not None
             with driver.session(database=self.database) as session:

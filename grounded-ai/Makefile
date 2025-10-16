@@ -9,11 +9,15 @@ NEO4J_URI = bolt://neo4j:7687
 NEO4J_USER = neo4j
 NEO4J_PASS = test1234
 QDRANT_URL = http://qdrant:6333
+NEO4J_SVC ?= neo4j 
+IMPORT_DIR ?= /var/lib/neo4j/import
+HOST_DATA    ?= ./data/medical_dummy
+CYpher_FILE  ?= ./scripts/load_all.cypher
 
 # ------------------------------------------
 # 기본 명령
 # ------------------------------------------
-.PHONY: up down rebuild logs seed pull models clean
+.PHONY: up down rebuild logs seed pull models clean db-cp db-load
 
 ## 컨테이너 기동 (FastAPI, Neo4j, Qdrant, UI)
 up:
@@ -40,9 +44,9 @@ seed:
 ## 불러오기 (Ollama 모델)
 pull:
 	@echo "⬇️ Pulling base models from Ollama..."
-	ollama pull qwen2.5:7b-instruct-q4_K_M
-# 	ollama pull qwen2-vl:2b-instruct-q4_0
-# 	ollama pull minicpm-v:2_6
+	ollama pull qwen2:7b-instruct-q4_K_M
+	ollama pull qwen-vl:latest
+	ollama pull minicpm-v:latest
 
 ## 로컬 모델 폴더 준비
 models:
@@ -74,10 +78,24 @@ gpu:
 	@echo "⚡ Starting with GPU profile..."
 	OLLAMA_HOST=$(OLLAMA_HOST) docker compose --profile gpu up -d --build
 
-# ------------------------------------------
-# 기본 흐름 (원클릭)
-# ------------------------------------------
+## CSV -> 컨테이너 import/ 폴더로 복사 (docker cp + container id)
+db-cp:
+	@echo "📦 Copy CSVs into Neo4j container import dir..."
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	for f in patients.csv encounters.csv observations.csv diagnoses.csv medications.csv imaging.csv ai_inference.csv; do \
+		echo "  - $$f"; \
+		docker cp $(HOST_DATA)/$$f $$cid:$(IMPORT_DIR)/; \
+	done; \
+	echo "✅ Copied all CSVs."
 
-## 전체 초기화 & 실행
-init: models pull up seed status
-	@echo "✅ Initialization complete!"
+## Cypher 스크립트 실행(파일 기반; docker cp + exec)
+db-load:
+	@echo "🧠 Running Cypher LOAD CSV from $(CYpher_FILE)..."
+	@[ -f $(CYpher_FILE) ] || { echo "❌ $(CYpher_FILE) not found. Create scripts/load_all.cypher first."; exit 1; }
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker cp $(CYpher_FILE) $$cid:/tmp/load_all.cypher; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/load_all.cypher; \
+	docker exec -t $$cid rm -f /tmp/load_all.cypher; \
+	echo "✅ Neo4j LOAD CSV done."
