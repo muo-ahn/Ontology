@@ -44,8 +44,9 @@ seed:
 ## 불러오기 (Ollama 모델)
 pull:
 	@echo "⬇️ Pulling base models from Ollama..."
-	ollama pull qwen2:7b-instruct-q4_K_M
-	ollama pull qwen-vl:latest
+# 	ollama pull qwen2:7b-instruct-q4_K_M
+	ollama pull qwen2.5:7b-instruct-q4_K_M
+	ollama pull qwen2.5vl:latest
 	ollama pull minicpm-v:latest
 
 ## 로컬 모델 폴더 준비
