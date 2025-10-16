@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from routers import embed, kg, vision
 from services.clip_embedder import ClipEmbedder
+from services.llm_runner import LLMRunner
 from services.neo4j_client import Neo4jClient
 from services.qdrant_client import QdrantVectorStore
 from services.vlm_runner import VLMRunner
@@ -20,11 +21,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     qdrant_client = QdrantVectorStore.from_env()
     vlm_runner = VLMRunner.from_env()
     clip_embedder = ClipEmbedder.from_env()
+    llm_runner = LLMRunner.from_env()
 
     app.state.neo4j = neo4j_client
     app.state.qdrant = qdrant_client
     app.state.vlm = vlm_runner
     app.state.embedder = clip_embedder
+    app.state.llm = llm_runner
 
     try:
         yield
@@ -33,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         qdrant_client.close()
         vlm_runner.close()
         clip_embedder.close()
+        llm_runner.close()
 
 
 app = FastAPI(

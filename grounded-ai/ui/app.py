@@ -30,21 +30,56 @@ st.markdown(
 )
 
 
-st.header("Vision Inference")
+st.header("Vision + LLM Inference")
 uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
-prompt = st.text_area("Prompt", value="Summarize the key findings in this image.")
+prompt = st.text_area("Vision Prompt", value="Summarize the key findings in this image.")
+llm_prompt = st.text_area(
+    "LLM Follow-up Prompt",
+    value="Given the vision summary, what follow-up actions or additional tests would you recommend?",
+)
+image_id = st.text_input(
+    "Image ID (optional, links inference to existing Neo4j Image node)",
+    value="",
+)
+persist = st.checkbox(
+    "Persist outputs to Neo4j",
+    value=bool(image_id),
+    help="Stores both VLM and LLM outputs as AIInference nodes if an Image ID is provided.",
+)
 if st.button("Run Vision Model", disabled=uploaded_file is None):
     if uploaded_file is None:
         st.warning("Please upload an image first.")
     else:
         files = {"image": (uploaded_file.name, uploaded_file.read(), uploaded_file.type)}
-        data = {"prompt": prompt, "task": "caption"}
+        data = {
+            "prompt": prompt,
+            "llm_prompt": llm_prompt,
+            "task": "caption",
+            "persist": str(persist).lower(),
+        }
+        if image_id.strip():
+            data["image_id"] = image_id.strip()
         try:
-            response = requests.post(f"{API_URL}/vision/inference", data=data, files=files, timeout=30)
+            response = requests.post(f"{API_URL}/vision/inference", data=data, files=files, timeout=120)
             response.raise_for_status()
             payload = response.json()
-            st.success(payload.get("output"))
-            st.caption(f"Model: {payload.get('model')} • Latency: {payload.get('latency_ms')} ms")
+            st.subheader("Vision Model Output")
+            st.success(payload.get("vlm_output"))
+            st.caption(
+                f"Model: {payload.get('vlm_model')} • Latency: {payload.get('vlm_latency_ms')} ms",
+            )
+            st.subheader("LLM Reasoning")
+            st.info(payload.get("llm_output"))
+            st.caption(
+                f"Model: {payload.get('llm_model')} • Latency: {payload.get('llm_latency_ms')} ms",
+            )
+            if payload.get("persisted"):
+                st.success(
+                    f"Persisted inference nodes: VLM={payload.get('vlm_inference_id')} "
+                    f"LLM={payload.get('llm_inference_id')}"
+                )
+            else:
+                st.caption("Graph persistence skipped.")
         except requests.RequestException as exc:
             st.error(f"Vision endpoint error: {exc}")
 

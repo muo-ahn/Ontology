@@ -1,71 +1,64 @@
 """
-Callable helper to interact with a local vision-language model endpoint (e.g. Ollama).
-Falls back to mock responses when httpx is unavailable.
+Helper for invoking local LLMs (Ollama) for text-only reasoning.
+Falls back to mock echoes when httpx/host is unavailable so the API remains callable.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import time
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Dict, Optional
 
 
-class Task(str, Enum):
-    CAPTION = "caption"
-    VQA = "vqa"
-
-
 @dataclass
-class VLMRunner:
+class LLMRunner:
     base_url: str
     model: str
     timeout: float
     _client: Optional[object] = None
-
-    Task = Task
 
     def __post_init__(self) -> None:
         try:
             import httpx  # type: ignore
 
             self._client = httpx.AsyncClient(timeout=self.timeout)
-        except Exception:  # pragma: no cover - fallback
+        except Exception:  # pragma: no cover - fallback path
             self._client = None
 
     @classmethod
-    def from_env(cls) -> "VLMRunner":
+    def from_env(cls) -> "LLMRunner":
         base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        model = os.getenv("VLM_MODEL", "qwen2-vl:2b-instruct-q4_0")
-        timeout = float(os.getenv("VLM_TIMEOUT", "60"))
+        model = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+        timeout = float(os.getenv("LLM_TIMEOUT", "120"))
         return cls(base_url=base_url, model=model, timeout=timeout)
 
     async def generate(
         self,
-        image_bytes: bytes,
         prompt: str,
-        task: Task = Task.CAPTION,
+        *,
         temperature: float = 0.2,
+        context: Optional[str] = None,
     ) -> Dict[str, Any]:
         start = time.perf_counter()
         if self._client is None:
-            message = f"[mock-{task}] {prompt}"
+            # Offline mock useful during development without Ollama
+            message = f"[mock-llm] {prompt[:200]}"
             return {
                 "output": message,
                 "model": self.model,
                 "latency_ms": int((time.perf_counter() - start) * 1000),
             }
 
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
-            "options": {"temperature": temperature},
-            "images": [base64.b64encode(image_bytes).decode("utf-8")],
             "stream": False,
+            "options": {"temperature": temperature},
         }
+        if context:
+            payload["context"] = context
 
         async def _post() -> Dict[str, Any]:
             client = self._client
