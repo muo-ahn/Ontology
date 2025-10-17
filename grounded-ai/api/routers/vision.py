@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
@@ -40,6 +43,7 @@ def get_neo4j(request: Request) -> Neo4jClient:
 
 
 class VisionInferenceResponse(BaseModel):
+    image_id: str
     vlm_output: str = Field(..., description="Caption or VQA output from the vision model")
     vlm_model: str
     vlm_latency_ms: int
@@ -60,36 +64,121 @@ async def _persist_inference(
     task: str,
     output: str,
     temperature: float,
+    idempotency_key: str,
 ) -> str:
     timestamp = datetime.now(timezone.utc).isoformat()
-    records = await neo4j.run_query(
+
+    existing = await neo4j.run_query(
+        """
+        MATCH (token:Idempotency {key: $idempotency_key})
+        RETURN token.inference_id AS inference_id
+        """,
+        {"idempotency_key": idempotency_key},
+    )
+    if existing:
+        logger.info(
+            "Idempotent hit for key=%s inference_id=%s",
+            idempotency_key,
+            existing[0]["inference_id"],
+        )
+        return existing[0]["inference_id"]
+
+    image_records = await neo4j.run_query(
         """
         MATCH (img:Image {image_id: $image_id})
+        RETURN img.image_id AS image_id
+        """,
+        {"image_id": image_id},
+    )
+    if not image_records:
+        logger.warning("Neo4j image lookup failed for image_id=%s", image_id)
+        raise HTTPException(status_code=404, detail=f"Image {image_id} not found in Neo4j")
+
+    await neo4j.run_query(
+        """
         MERGE (inf:AIInference {inference_id: $inference_id})
-        SET inf += {
-            model: $model,
-            task: $task,
-            output: $output,
-            temperature: $temperature,
-            timestamp: $timestamp
-        }
-        MERGE (img)-[:HAS_INFERENCE]->(inf)
-        RETURN count(img) AS matched
+        SET inf += $properties
+        SET inf.created_at = COALESCE(inf.created_at, datetime())
+        """,
+        {
+            "inference_id": inference_id,
+            "properties": {
+                "model": model,
+                "task": task,
+                "output": output,
+                "temperature": float(temperature),
+                "timestamp": timestamp,
+            },
+        },
+    )
+
+    await neo4j.run_query(
+        """
+        MATCH (img:Image {image_id: $image_id}),
+              (inf:AIInference {inference_id: $inference_id})
+        MERGE (img)-[h:HAS_INFERENCE]->(inf)
+        ON CREATE SET h.at = $timestamp
         """,
         {
             "image_id": image_id,
             "inference_id": inference_id,
-            "model": model,
-            "task": task,
-            "output": output,
-            "temperature": temperature,
             "timestamp": timestamp,
         },
     )
-    if not records or records[0].get("matched", 0) == 0:
-        logger.warning("Neo4j image lookup failed for image_id=%s", image_id)
-        raise HTTPException(status_code=404, detail=f"Image {image_id} not found in Neo4j")
+
+    await neo4j.run_query(
+        """
+        MERGE (token:Idempotency {key: $idempotency_key})
+        ON CREATE SET token.created_at = datetime()
+        SET token.inference_id = $inference_id,
+            token.image_id = $image_id
+        """,
+        {
+            "idempotency_key": idempotency_key,
+            "inference_id": inference_id,
+            "image_id": image_id,
+        },
+    )
     return inference_id
+
+
+async def _ensure_image(
+    neo4j: Neo4jClient,
+    *,
+    image_id: str,
+    file_path: str,
+    modality: Optional[str],
+    patient_id: Optional[str],
+    encounter_id: Optional[str],
+    caption_hint: Optional[str],
+) -> None:
+    records = await neo4j.run_query(
+        """
+        MERGE (img:Image {image_id: $image_id})
+        SET img.file_path = $file_path,
+            img.modality = COALESCE($modality, img.modality),
+            img.caption_hint = COALESCE($caption_hint, img.caption_hint),
+            img.updated_at = datetime()
+        WITH img
+        FOREACH (_ IN CASE WHEN $patient_id IS NOT NULL AND $encounter_id IS NOT NULL THEN [1] ELSE [] END |
+          MERGE (p:Patient {patient_id: $patient_id})
+          MERGE (e:Encounter {encounter_id: $encounter_id})
+          MERGE (p)-[:HAS_ENCOUNTER]->(e)
+          MERGE (e)-[:HAS_IMAGE]->(img)
+        )
+        RETURN img.image_id AS image_id
+        """,
+        {
+            "image_id": image_id,
+            "file_path": file_path,
+            "modality": modality,
+            "patient_id": patient_id,
+            "encounter_id": encounter_id,
+            "caption_hint": caption_hint,
+        },
+    )
+    if not records:
+        raise HTTPException(status_code=500, detail="Failed to upsert image node")
 
 
 @router.post("/inference", response_model=VisionInferenceResponse)
@@ -103,9 +192,16 @@ async def run_inference(
     task: VLMRunner.Task = Form(VLMRunner.Task.CAPTION),
     temperature: float = Form(0.2),
     llm_temperature: float = Form(0.2),
-    image_id: Optional[str] = Form(
+    image_id: Optional[str] = Form(None, description="Existing or new image identifier."),
+    modality: Optional[str] = Form(
         None,
-        description="Optional Image node ID for persistence into Neo4j.",
+        description="Imaging modality (XR, CT, MRI, US, etc.).",
+    ),
+    patient_id: Optional[str] = Form(None, description="Optional patient identifier for new images."),
+    encounter_id: Optional[str] = Form(None, description="Optional encounter identifier for new images."),
+    idempotency_key: Optional[str] = Form(
+        None,
+        description="Client-supplied key to prevent duplicate processing.",
     ),
     persist: bool = Form(
         True,
@@ -126,6 +222,21 @@ async def run_inference(
     )
 
     contents = await image.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    image_hash = hashlib.sha256(contents).hexdigest()
+    derived_image_id = image_id or f"img-{image_hash[:16]}"
+    upload_dir = Path(os.getenv("IMAGE_UPLOAD_DIR", "/data/uploads"))
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    extension = Path(image.filename or "upload.png").suffix or ".png"
+    stored_path = upload_dir / f"{derived_image_id}{extension}"
+    try:
+        stored_path.write_bytes(contents)
+    except Exception as exc:  # pragma: no cover - filesystem errors
+        logger.error("Failed to persist image bytes: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to persist uploaded image data") from exc
+
     vlm_result = await runner.generate(
         image_bytes=contents,
         prompt=prompt,
@@ -156,31 +267,49 @@ async def run_inference(
     persisted = False
     vlm_inference_id: Optional[str] = None
     llm_inference_id: Optional[str] = None
-    if persist and image_id:
-        vlm_inference_id = str(uuid4())
-        llm_inference_id = str(uuid4())
+    if persist:
+        await _ensure_image(
+            neo4j,
+            image_id=derived_image_id,
+            file_path=str(stored_path),
+            modality=modality,
+            patient_id=patient_id,
+            encounter_id=encounter_id,
+            caption_hint=vlm_output or llm_result.get("output"),
+        )
+
+        base_payload = f"{derived_image_id}:{task.value}:{prompt}:{image_hash}"
+        vlm_key = idempotency_key or hashlib.sha256(base_payload.encode()).hexdigest()
+        vlm_inference_id = f"vlm-{vlm_key[:18]}"
+
+        llm_payload = f"{derived_image_id}:llm:{llm_prompt}:{vlm_output}"
+        llm_key = hashlib.sha256(llm_payload.encode()).hexdigest()
+        llm_inference_id = f"llm-{llm_key[:18]}"
+
         await _persist_inference(
             neo4j,
-            image_id=image_id,
+            image_id=derived_image_id,
             inference_id=vlm_inference_id,
             model=vlm_result.get("model", ""),
             task=task.value,
             output=vlm_output,
             temperature=temperature,
+            idempotency_key=f"{vlm_inference_id}:{vlm_key}",
         )
         await _persist_inference(
             neo4j,
-            image_id=image_id,
+            image_id=derived_image_id,
             inference_id=llm_inference_id,
             model=llm_result.get("model", ""),
             task=f"{task.value}_analysis",
             output=llm_result.get("output", ""),
             temperature=llm_temperature,
+            idempotency_key=f"{llm_inference_id}:{llm_key}",
         )
         persisted = True
         logger.info(
             "Persisted inference nodes image_id=%s vlm_id=%s llm_id=%s",
-            image_id,
+            derived_image_id,
             vlm_inference_id,
             llm_inference_id,
         )
@@ -188,6 +317,7 @@ async def run_inference(
         logger.info("Persistence requested but no image_id provided; skipping write.")
 
     return VisionInferenceResponse(
+        image_id=derived_image_id,
         vlm_output=vlm_output,
         vlm_model=vlm_result.get("model", ""),
         vlm_latency_ms=vlm_result.get("latency_ms", 0),

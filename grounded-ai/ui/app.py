@@ -41,6 +41,23 @@ image_id = st.text_input(
     "Image ID (optional, links inference to existing Neo4j Image node)",
     value="",
 )
+modality = st.text_input(
+    "Modality (optional)",
+    value="",
+)
+patient_id = st.text_input(
+    "Patient ID (optional)",
+    value="",
+)
+encounter_id = st.text_input(
+    "Encounter ID (optional)",
+    value="",
+)
+idempotency_key = st.text_input(
+    "Idempotency Key (optional)",
+    help="Provide a stable key to prevent duplicate graph writes. Leave blank to auto-generate.",
+    value="",
+)
 persist = st.checkbox(
     "Persist outputs to Neo4j",
     value=bool(image_id),
@@ -59,6 +76,14 @@ if st.button("Run Vision Model", disabled=uploaded_file is None):
         }
         if image_id.strip():
             data["image_id"] = image_id.strip()
+        if modality.strip():
+            data["modality"] = modality.strip()
+        if patient_id.strip():
+            data["patient_id"] = patient_id.strip()
+        if encounter_id.strip():
+            data["encounter_id"] = encounter_id.strip()
+        if idempotency_key.strip():
+            data["idempotency_key"] = idempotency_key.strip()
         try:
             response = requests.post(f"{API_URL}/vision/inference", data=data, files=files, timeout=120)
             response.raise_for_status()
@@ -68,6 +93,7 @@ if st.button("Run Vision Model", disabled=uploaded_file is None):
             st.caption(
                 f"Model: {payload.get('vlm_model')} • Latency: {payload.get('vlm_latency_ms')} ms",
             )
+            st.caption(f"Image ID: {payload.get('image_id')}")
             st.subheader("LLM Reasoning")
             st.info(payload.get("llm_output"))
             st.caption(
