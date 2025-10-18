@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from routers import embed, kg, vision
 from services.clip_embedder import ClipEmbedder
 from events.bus import EventBus
+from events.tracker import TaskStatusTracker
 from services.graph_repository import GraphRepository
 from services.llm_runner import LLMRunner
 from services.neo4j_client import Neo4jClient
@@ -26,7 +27,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     clip_embedder = ClipEmbedder.from_env()
     llm_runner = LLMRunner.from_env()
     graph_repo = GraphRepository.from_env()
-    event_bus = EventBus(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    event_bus = EventBus(redis_url)
+    status_tracker = TaskStatusTracker(redis_url)
 
     app.state.neo4j = neo4j_client
     app.state.qdrant = qdrant_client
@@ -35,6 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.llm = llm_runner
     app.state.graph_repo = graph_repo
     app.state.event_bus = event_bus
+    app.state.status_tracker = status_tracker
 
     try:
         yield
@@ -45,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         clip_embedder.close()
         llm_runner.close()
         await event_bus.close()
+        await status_tracker.close()
         # GraphRepository uses lazy HTTP sessions; no explicit close method.
 
 

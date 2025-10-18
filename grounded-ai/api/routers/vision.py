@@ -12,6 +12,9 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from events.bus import EventBus
+from events.constants import IMAGE_RECEIVED_STREAM
+from events.tracker import TaskStatusTracker
 from services.graph_repository import GraphRepository
 from services.llm_runner import LLMRunner
 from services.vlm_runner import VLMRunner
@@ -41,6 +44,20 @@ def get_graph_repo(request: Request) -> GraphRepository:
     if repo is None:
         raise HTTPException(status_code=500, detail="Graph repository unavailable")
     return repo
+
+
+def get_event_bus(request: Request) -> EventBus:
+    bus: EventBus | None = getattr(request.app.state, "event_bus", None)
+    if bus is None:
+        raise HTTPException(status_code=500, detail="Event bus unavailable")
+    return bus
+
+
+def get_status_tracker(request: Request) -> TaskStatusTracker:
+    tracker: TaskStatusTracker | None = getattr(request.app.state, "status_tracker", None)
+    if tracker is None:
+        raise HTTPException(status_code=500, detail="Status tracker unavailable")
+    return tracker
 
 
 class VisionInferenceResponse(BaseModel):
@@ -104,6 +121,98 @@ async def _ensure_image(
         patient_id=patient_id,
         encounter_id=encounter_id,
         caption_hint=caption_hint,
+    )
+
+
+@router.post("/tasks")
+async def create_vision_task(
+    image: UploadFile,
+    prompt: str = Form(...),
+    llm_prompt: str = Form(
+        "Based on the vision summary, provide follow-up recommendations.",
+    ),
+    task: VLMRunner.Task = Form(VLMRunner.Task.CAPTION),
+    temperature: float = Form(0.2),
+    llm_temperature: float = Form(0.2),
+    image_id: Optional[str] = Form(None),
+    modality: Optional[str] = Form(None),
+    patient_id: Optional[str] = Form(None),
+    encounter_id: Optional[str] = Form(None),
+    persist: bool = Form(True),
+    idempotency_key: Optional[str] = Form(None),
+    event_bus: EventBus = Depends(get_event_bus),
+    status_tracker: TaskStatusTracker = Depends(get_status_tracker),
+) -> dict[str, str]:
+    contents = await image.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    image_hash = hashlib.sha256(contents).hexdigest()
+    derived_image_id = image_id or f"img-{image_hash[:16]}"
+    task_id = idempotency_key or str(uuid4())
+
+    upload_dir = Path(os.getenv("IMAGE_UPLOAD_DIR", "/data/uploads"))
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    extension = Path(image.filename or "upload.png").suffix or ".png"
+    stored_path = upload_dir / f"{derived_image_id}{extension}"
+    try:
+        stored_path.write_bytes(contents)
+    except Exception as exc:  # pragma: no cover
+        logger.error("Failed to persist image bytes for task %s: %s", task_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to persist uploaded image data") from exc
+
+    payload = {
+        "task_id": task_id,
+        "image_id": derived_image_id,
+        "image_path": str(stored_path),
+        "prompt": prompt,
+        "llm_prompt": llm_prompt,
+        "task": task.value,
+        "temperature": temperature,
+        "llm_temperature": llm_temperature,
+        "modality": modality,
+        "patient_id": patient_id,
+        "encounter_id": encounter_id,
+        "persist": persist,
+    }
+
+    await status_tracker.append(
+        task_id,
+        "queued",
+        {
+            "image_id": derived_image_id,
+            "persist": persist,
+            "task": task.value,
+        },
+    )
+
+    await event_bus.publish(
+        IMAGE_RECEIVED_STREAM,
+        payload,
+        idempotency_key=task_id,
+        metadata={"persist": persist},
+    )
+
+    return {
+        "task_id": task_id,
+        "image_id": derived_image_id,
+        "status_endpoint": f"/vision/tasks/{task_id}/events",
+    }
+
+
+@router.get("/tasks/{task_id}/events")
+async def stream_task_events(
+    task_id: str,
+    tracker: TaskStatusTracker = Depends(get_status_tracker),
+):
+    async def event_generator():
+        async for event in tracker.stream(task_id):
+            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
     )
 
 

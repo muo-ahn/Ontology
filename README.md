@@ -42,24 +42,59 @@
 ## Goal
 > 데이터와 언어, 감각이 분리되지 않는 **“이해 가능한 AI”** 를 만드는 첫 단계.
 
-## Test Usage
+---
 
-### Persist 옵션 활용
+## How to Try It
+
+### 1. 건강 상태 확인
 ```sh
-curl -X POST http://localhost:8000/vision/inference \
-  -F "prompt=Summarize the key findings in this X-ray." \
-  -F "image=@images/img_001.png"
+curl http://localhost:8000/health
 ```
 
-### Persist 옵션 활용
+### 2. 동기식 파이프라인 (즉시 응답)
+- **VLM + LLM 실행 (그래프 저장 안 함)**
+  ```sh
+  curl -X POST http://localhost:8000/vision/inference \
+    -F "prompt=Summarize the key findings in this X-ray." \
+    -F "image=@grounded-ai/data/medical_dummy/images/img_001.png" \
+    -F "persist=false"
+  ```
+- **그래프까지 업서트**
+  ```sh
+  curl -X POST http://localhost:8000/vision/inference \
+    -F "prompt=Summarize the key findings in this image." \
+    -F "llm_prompt=Given the vision summary, what should the clinician do next?" \
+    -F "image=@grounded-ai/data/medical_dummy/images/img_003.png" \
+    -F "modality=XR" \
+    -F "patient_id=P9999" \
+    -F "encounter_id=E9999" \
+    -F "persist=true" \
+    -F "idempotency_key=demo-sync-001"
+  ```
+
+### 3. 비동기 파이프라인 (Redis Streams + SSE)
+1. **작업 생성**
+   ```sh
+   curl -X POST http://localhost:8000/vision/tasks \
+     -F "prompt=Summarize the key findings in this X-ray." \
+     -F "llm_prompt=Given the vision summary, what should the clinician do next?" \
+     -F "image=@grounded-ai/data/medical_dummy/images/img_001.png" \
+     -F "persist=true"
+   ```
+   → `task_id` / `status_endpoint` 가 응답으로 돌아온다.
+
+2. **상태 스트림 구독 (Server-Sent Events)**
+   ```sh
+   curl -N http://localhost:8000/vision/tasks/<task_id>/events
+   ```
+   Redis Streams 기반 워커가 `queued → vision → llm → persisted` 순서로 이벤트를 푸시한다.
+
+### 4. 그래프 질의 샘플
 ```sh
-curl -X POST http://localhost:8000/vision/inference \
-  -F "prompt=Summarize the key findings in this image." \
-  -F "llm_prompt=Given the vision summary, what should the clinician do next?" \
-  -F "image=@images/img_003.png" \
-  -F "modality=XR" \
-  -F "patient_id=P9999" \
-  -F "encounter_id=E9999" \
-  -F "persist=true" \
-  -F "idempotency_key=demo-persist-001"
+curl -X POST http://localhost:8000/kg/cypher \
+     -H 'Content-Type: application/json' \
+     -d '{"query": "MATCH (p:Patient) RETURN p.patient_id LIMIT 5"}'
+```
+```sh
+curl http://localhost:8000/kg/patient/P1005
 ```
