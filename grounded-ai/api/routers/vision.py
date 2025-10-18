@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -11,8 +12,8 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from services.graph_repository import GraphRepository
 from services.llm_runner import LLMRunner
-from services.neo4j_client import Neo4jClient
 from services.vlm_runner import VLMRunner
 
 
@@ -35,11 +36,11 @@ def get_llm(request: Request) -> LLMRunner:
     return runner
 
 
-def get_neo4j(request: Request) -> Neo4jClient:
-    client: Neo4jClient | None = getattr(request.app.state, "neo4j", None)
-    if client is None:
-        raise HTTPException(status_code=500, detail="Neo4j unavailable")
-    return client
+def get_graph_repo(request: Request) -> GraphRepository:
+    repo: GraphRepository | None = getattr(request.app.state, "graph_repo", None)
+    if repo is None:
+        raise HTTPException(status_code=500, detail="Graph repository unavailable")
+    return repo
 
 
 class VisionInferenceResponse(BaseModel):
@@ -56,7 +57,7 @@ class VisionInferenceResponse(BaseModel):
 
 
 async def _persist_inference(
-    neo4j: Neo4jClient,
+    repo: GraphRepository,
     *,
     image_id: str,
     inference_id: str,
@@ -67,83 +68,26 @@ async def _persist_inference(
     idempotency_key: str,
 ) -> str:
     timestamp = datetime.now(timezone.utc).isoformat()
-
-    existing = await neo4j.run_query(
-        """
-        MATCH (token:Idempotency {key: $idempotency_key})
-        RETURN token.inference_id AS inference_id
-        """,
-        {"idempotency_key": idempotency_key},
+    properties = {
+        "model": model,
+        "task": task,
+        "output": output,
+        "temperature": float(temperature),
+        "timestamp": timestamp,
+    }
+    edge_properties = {"at": timestamp}
+    return await asyncio.to_thread(
+        repo.persist_inference,
+        image_id=image_id,
+        inference_id=inference_id,
+        properties=properties,
+        edge_properties=edge_properties,
+        idempotency_key=idempotency_key,
     )
-    if existing:
-        logger.info(
-            "Idempotent hit for key=%s inference_id=%s",
-            idempotency_key,
-            existing[0]["inference_id"],
-        )
-        return existing[0]["inference_id"]
-
-    image_records = await neo4j.run_query(
-        """
-        MATCH (img:Image {image_id: $image_id})
-        RETURN img.image_id AS image_id
-        """,
-        {"image_id": image_id},
-    )
-    if not image_records:
-        logger.warning("Neo4j image lookup failed for image_id=%s", image_id)
-        raise HTTPException(status_code=404, detail=f"Image {image_id} not found in Neo4j")
-
-    await neo4j.run_query(
-        """
-        MERGE (inf:AIInference {inference_id: $inference_id})
-        SET inf += $properties
-        SET inf.created_at = COALESCE(inf.created_at, datetime())
-        """,
-        {
-            "inference_id": inference_id,
-            "properties": {
-                "model": model,
-                "task": task,
-                "output": output,
-                "temperature": float(temperature),
-                "timestamp": timestamp,
-            },
-        },
-    )
-
-    await neo4j.run_query(
-        """
-        MATCH (img:Image {image_id: $image_id}),
-              (inf:AIInference {inference_id: $inference_id})
-        MERGE (img)-[h:HAS_INFERENCE]->(inf)
-        ON CREATE SET h.at = $timestamp
-        """,
-        {
-            "image_id": image_id,
-            "inference_id": inference_id,
-            "timestamp": timestamp,
-        },
-    )
-
-    await neo4j.run_query(
-        """
-        MERGE (token:Idempotency {key: $idempotency_key})
-        ON CREATE SET token.created_at = datetime()
-        SET token.inference_id = $inference_id,
-            token.image_id = $image_id
-        """,
-        {
-            "idempotency_key": idempotency_key,
-            "inference_id": inference_id,
-            "image_id": image_id,
-        },
-    )
-    return inference_id
 
 
 async def _ensure_image(
-    neo4j: Neo4jClient,
+    repo: GraphRepository,
     *,
     image_id: str,
     file_path: str,
@@ -152,33 +96,15 @@ async def _ensure_image(
     encounter_id: Optional[str],
     caption_hint: Optional[str],
 ) -> None:
-    records = await neo4j.run_query(
-        """
-        MERGE (img:Image {image_id: $image_id})
-        SET img.file_path = $file_path,
-            img.modality = COALESCE($modality, img.modality),
-            img.caption_hint = COALESCE($caption_hint, img.caption_hint),
-            img.updated_at = datetime()
-        WITH img
-        FOREACH (_ IN CASE WHEN $patient_id IS NOT NULL AND $encounter_id IS NOT NULL THEN [1] ELSE [] END |
-          MERGE (p:Patient {patient_id: $patient_id})
-          MERGE (e:Encounter {encounter_id: $encounter_id})
-          MERGE (p)-[:HAS_ENCOUNTER]->(e)
-          MERGE (e)-[:HAS_IMAGE]->(img)
-        )
-        RETURN img.image_id AS image_id
-        """,
-        {
-            "image_id": image_id,
-            "file_path": file_path,
-            "modality": modality,
-            "patient_id": patient_id,
-            "encounter_id": encounter_id,
-            "caption_hint": caption_hint,
-        },
+    await asyncio.to_thread(
+        repo.ensure_image,
+        image_id=image_id,
+        file_path=file_path,
+        modality=modality,
+        patient_id=patient_id,
+        encounter_id=encounter_id,
+        caption_hint=caption_hint,
     )
-    if not records:
-        raise HTTPException(status_code=500, detail="Failed to upsert image node")
 
 
 @router.post("/inference", response_model=VisionInferenceResponse)
@@ -209,7 +135,7 @@ async def run_inference(
     ),
     runner: VLMRunner = Depends(get_vlm),
     llm: LLMRunner = Depends(get_llm),
-    neo4j: Neo4jClient = Depends(get_neo4j),
+    graph_repo: GraphRepository = Depends(get_graph_repo),
 ) -> VisionInferenceResponse:
     logger.info(
         "Vision inference requested image_id=%s persist=%s task=%s "
@@ -269,7 +195,7 @@ async def run_inference(
     llm_inference_id: Optional[str] = None
     if persist:
         await _ensure_image(
-            neo4j,
+            graph_repo,
             image_id=derived_image_id,
             file_path=str(stored_path),
             modality=modality,
@@ -287,7 +213,7 @@ async def run_inference(
         llm_inference_id = f"llm-{llm_key[:18]}"
 
         await _persist_inference(
-            neo4j,
+            graph_repo,
             image_id=derived_image_id,
             inference_id=vlm_inference_id,
             model=vlm_result.get("model", ""),
@@ -297,7 +223,7 @@ async def run_inference(
             idempotency_key=f"{vlm_inference_id}:{vlm_key}",
         )
         await _persist_inference(
-            neo4j,
+            graph_repo,
             image_id=derived_image_id,
             inference_id=llm_inference_id,
             model=llm_result.get("model", ""),

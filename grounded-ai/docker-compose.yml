@@ -16,6 +16,10 @@ services:
     ports: ["6333:6333"]
     volumes: [qdrant_storage:/qdrant/storage]
 
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
   api:
     build: ./api
     environment:
@@ -26,9 +30,10 @@ services:
       OLLAMA_HOST: http://host.docker.internal:11434
       VLM_MODEL: qwen2.5vl:latest
       LLM_MODEL: "qwen2.5:7b-instruct-q4_K_M"
+      REDIS_URL: redis://redis:6379/0
     volumes: ["./api:/app","./models:/models","./data:/data"]
     ports: ["8000:8000"]
-    depends_on: [neo4j, qdrant]
+    depends_on: [neo4j, qdrant, redis]
 
   ui:
     build: ./ui

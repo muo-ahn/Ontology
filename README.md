@@ -42,3 +42,24 @@
 ## Goal
 > 데이터와 언어, 감각이 분리되지 않는 **“이해 가능한 AI”** 를 만드는 첫 단계.
 
+## Test Usage
+
+### Persist 옵션 활용
+```sh
+curl -X POST http://localhost:8000/vision/inference \
+  -F "prompt=Summarize the key findings in this X-ray." \
+  -F "image=@images/img_001.png"
+```
+
+### Persist 옵션 활용
+```sh
+curl -X POST http://localhost:8000/vision/inference \
+  -F "prompt=Summarize the key findings in this image." \
+  -F "llm_prompt=Given the vision summary, what should the clinician do next?" \
+  -F "image=@images/img_003.png" \
+  -F "modality=XR" \
+  -F "patient_id=P9999" \
+  -F "encounter_id=E9999" \
+  -F "persist=true" \
+  -F "idempotency_key=demo-persist-001"
+```
