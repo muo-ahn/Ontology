@@ -18,6 +18,8 @@ from events.constants import IMAGE_RECEIVED_STREAM
 from events.tracker import TaskStatusTracker
 from services.graph_repository import GraphRepository
 from services.llm_runner import LLMRunner
+from services.clip_embedder import ClipEmbedder
+from services.qdrant_client import QdrantVectorStore
 from services.vlm_runner import VLMRunner
 
 
@@ -61,6 +63,20 @@ def get_status_tracker(request: Request) -> TaskStatusTracker:
     return tracker
 
 
+def get_embedder(request: Request) -> ClipEmbedder:
+    embedder: ClipEmbedder | None = getattr(request.app.state, "embedder", None)
+    if embedder is None:
+        raise HTTPException(status_code=500, detail="Embedder unavailable")
+    return embedder
+
+
+def get_vector_store(request: Request) -> QdrantVectorStore:
+    store: QdrantVectorStore | None = getattr(request.app.state, "qdrant", None)
+    if store is None:
+        raise HTTPException(status_code=500, detail="Vector store unavailable")
+    return store
+
+
 class VisionInferenceResponse(BaseModel):
     image_id: str
     vlm_output: str = Field(..., description="Caption or VQA output from the vision model")
@@ -72,6 +88,9 @@ class VisionInferenceResponse(BaseModel):
     persisted: bool = False
     vlm_inference_id: Optional[str] = None
     llm_inference_id: Optional[str] = None
+    image_vector_id: Optional[str] = None
+    vlm_vector_id: Optional[str] = None
+    llm_vector_id: Optional[str] = None
 
 
 async def _persist_inference(
@@ -123,6 +142,63 @@ async def _ensure_image(
         encounter_id=encounter_id,
         caption_hint=caption_hint,
     )
+
+
+async def _store_embeddings(
+    embedder: ClipEmbedder,
+    vector_store: QdrantVectorStore,
+    *,
+    image_bytes: bytes,
+    image_path: str,
+    image_id: str,
+    vlm_output: Optional[str],
+    llm_output: Optional[str],
+    vlm_inference_id: Optional[str],
+    llm_inference_id: Optional[str],
+) -> dict[str, Optional[str]]:
+    await vector_store.ensure_collection()
+    results: dict[str, Optional[str]] = {
+        "image_vector_id": None,
+        "vlm_vector_id": None,
+        "llm_vector_id": None,
+    }
+
+    image_vector = await embedder.embed_image(image_bytes)
+    results["image_vector_id"] = await vector_store.upsert_image(
+        collection=vector_store.default_collection,
+        filename=Path(image_path).name,
+        vector=image_vector,
+        mime_type="image/png",
+        metadata={"image_id": image_id, "source": "vision"},
+    )
+
+    if vlm_output:
+        vlm_vector = await embedder.embed_text(vlm_output)
+        results["vlm_vector_id"] = await vector_store.upsert_text(
+            collection=vector_store.default_collection,
+            text=vlm_output,
+            vector=vlm_vector,
+            metadata={
+                "image_id": image_id,
+                "inference_id": vlm_inference_id,
+                "source": "vlm",
+            },
+        )
+
+    if llm_output:
+        llm_vector = await embedder.embed_text(llm_output)
+        results["llm_vector_id"] = await vector_store.upsert_text(
+            collection=vector_store.default_collection,
+            text=llm_output,
+            vector=llm_vector,
+            metadata={
+                "image_id": image_id,
+                "inference_id": llm_inference_id,
+                "source": "llm",
+            },
+        )
+
+    return results
 
 
 @router.post("/tasks")
@@ -246,6 +322,8 @@ async def run_inference(
     runner: VLMRunner = Depends(get_vlm),
     llm: LLMRunner = Depends(get_llm),
     graph_repo: GraphRepository = Depends(get_graph_repo),
+    embedder: ClipEmbedder = Depends(get_embedder),
+    vector_store: QdrantVectorStore = Depends(get_vector_store),
 ) -> VisionInferenceResponse:
     logger.info(
         "Vision inference requested image_id=%s persist=%s task=%s "
@@ -303,6 +381,9 @@ async def run_inference(
     persisted = False
     vlm_inference_id: Optional[str] = None
     llm_inference_id: Optional[str] = None
+    image_vector_id: Optional[str] = None
+    vlm_vector_id: Optional[str] = None
+    llm_vector_id: Optional[str] = None
     if persist:
         await _ensure_image(
             graph_repo,
@@ -342,6 +423,48 @@ async def run_inference(
             temperature=llm_temperature,
             idempotency_key=f"{llm_inference_id}:{llm_key}",
         )
+
+        try:
+            embedding_ids = await _store_embeddings(
+                embedder,
+                vector_store,
+                image_bytes=contents,
+                image_path=str(stored_path),
+                image_id=derived_image_id,
+                vlm_output=vlm_output,
+                llm_output=llm_result.get("output"),
+                vlm_inference_id=vlm_inference_id,
+                llm_inference_id=llm_inference_id,
+            )
+            image_vector_id = embedding_ids.get("image_vector_id")
+            vlm_vector_id = embedding_ids.get("vlm_vector_id")
+            llm_vector_id = embedding_ids.get("llm_vector_id")
+
+            if image_vector_id:
+                await asyncio.to_thread(
+                    graph_repo.set_image_embedding,
+                    derived_image_id,
+                    image_vector_id,
+                )
+            if vlm_vector_id and vlm_inference_id:
+                await asyncio.to_thread(
+                    graph_repo.set_inference_embedding,
+                    vlm_inference_id,
+                    vlm_vector_id,
+                )
+            if llm_vector_id and llm_inference_id:
+                await asyncio.to_thread(
+                    graph_repo.set_inference_embedding,
+                    llm_inference_id,
+                    llm_vector_id,
+                )
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.warning(
+                "Embedding persistence failed for image_id=%s: %s",
+                derived_image_id,
+                exc,
+            )
+
         persisted = True
         logger.info(
             "Persisted inference nodes image_id=%s vlm_id=%s llm_id=%s",
@@ -363,4 +486,7 @@ async def run_inference(
         persisted=persisted,
         vlm_inference_id=vlm_inference_id,
         llm_inference_id=llm_inference_id,
+        image_vector_id=image_vector_id,
+        vlm_vector_id=vlm_vector_id,
+        llm_vector_id=llm_vector_id,
     )

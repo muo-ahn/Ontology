@@ -91,9 +91,10 @@ class QdrantVectorStore:
         filename: str,
         vector: List[float],
         mime_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         point_id = str(uuid.uuid4())
-        payload = {"filename": filename, "mime_type": mime_type}
+        payload = {"filename": filename, "mime_type": mime_type, **(metadata or {})}
         await self._upsert_point(collection, point_id, vector, payload)
         return point_id
 

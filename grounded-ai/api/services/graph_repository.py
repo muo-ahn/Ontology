@@ -103,3 +103,23 @@ class GraphRepository:
 
         tx.commit()
         return inference_id
+
+    def set_image_embedding(self, image_id: str, embedding_id: str) -> None:
+        self._graph.run(
+            """
+            MATCH (img:Image {image_id: $image_id})
+            SET img.embedding_id = $embedding_id
+            """,
+            image_id=image_id,
+            embedding_id=embedding_id,
+        )
+
+    def set_inference_embedding(self, inference_id: str, embedding_id: str) -> None:
+        self._graph.run(
+            """
+            MATCH (inf:AIInference {inference_id: $inference_id})
+            SET inf.embedding_id = $embedding_id
+            """,
+            inference_id=inference_id,
+            embedding_id=embedding_id,
+        )
