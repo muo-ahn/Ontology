@@ -9,7 +9,7 @@ from neo4j import GraphDatabase, basic_auth
 
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema" / "v1_1"
-SEED_FILE = Path(__file__).resolve().parents[2] / "data" / "seed.cypher"
+SEED_FILE = Path(__file__).resolve().parents[2] / "scripts" / "seed.cypher"
 
 
 def _load_statements(path: Path) -> list[str]:
