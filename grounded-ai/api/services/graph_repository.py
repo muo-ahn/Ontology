@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from py2neo import Graph, Node, Relationship  # type: ignore
-from py2neo.database import ClientError  # type: ignore
+from py2neo.errors import ClientError  # type: ignore
 
 logger = logging.getLogger(__name__)
 

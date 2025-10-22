@@ -39,7 +39,12 @@ logs:
 ## 시드 데이터 주입 (Neo4j)
 seed:
 	@echo "🌱 Seeding Neo4j with sample Ontology..."
-	cypher-shell -a $(NEO4J_URI) -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /data/seed.cypher || true
+	@[ -f $(CYpher_FILE) ] || { echo "❌ $(CYpher_FILE) not found. Create scripts/seed.cypher first."; exit 1; }
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker cp $(CYpher_FILE) $$cid:/tmp/seed.cypher; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/seed.cypher; \
+	docker exec -t $$cid rm -f /tmp/seed.cypher; \
 
 ## 불러오기 (Ollama 모델)
 pull:
