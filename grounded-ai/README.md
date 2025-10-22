@@ -43,8 +43,7 @@
 3. **Ontology update**: Persist vLM → LLM outputs to Neo4j and expand the graph.
 4. **Composite query**: “Find hypertensive patients (I10) from the last 60 days with SBP > 140 who received antihypertensive medication.”
 
-## Next Steps
-- Import CSVs into Neo4j and execute `seed.cypher`.
-- Wire the vLM → LLM → Ontology pipeline inside the FastAPI orchestrator.
-- Build the Streamlit front end for image upload plus Q&A workflows.
-- Iterate locally with Codex-driven orchestration code and prompt experiments.
+## Further Tasks
+1. **Late Fusion**: Maintain separate LLM and vLM inference paths while refining prompt-level integration.
+2. **Mid Fusion**: Prototype cross-attention or visual token injection to align latent representations between models.
+3. **GraphDB Modeling**: Iterate on Neo4j schema, constraints, and data quality checks to strengthen ontology consistency.

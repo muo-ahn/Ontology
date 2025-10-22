@@ -1,5 +1,5 @@
-med_id,encounter_id,patient_id,drug_name,for_icd10,dose,schedule
-M00001,E0003,P1002,amlodipine,I10,20mg,qd
-M00002,E0005,P1003,azithromycin,J18.9,5mg,tid
-M00003,E0006,P1004,atorvastatin,E78.5,20mg,tid
-M00004,E0008,P1005,azithromycin,J18.9,10mg,qd
+med_id,encounter_id,patient_id,drug_name,for_icd10,dose,route,schedule,start_time,end_time
+M00001,E0003,P1002,amlodipine,I10,10mg,oral,qd,2025-06-30T09:00:00,2025-07-14T09:00:00
+M00002,E0005,P1003,azithromycin,J18.9,500mg,oral,qd,2025-06-24T08:00:00,2025-06-28T08:00:00
+M00003,E0006,P1004,atorvastatin,E78.5,20mg,oral,hs,2025-07-05T22:00:00,2025-07-19T22:00:00
+M00004,E0008,P1005,metformin,E11.9,850mg,oral,bid,2025-07-15T07:00:00,2025-08-15T07:00:00

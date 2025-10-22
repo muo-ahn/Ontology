@@ -27,6 +27,8 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+ONTOLOGY_VERSION = os.getenv("ONTOLOGY_VERSION", "1.1")
+
 
 def get_vlm(request: Request) -> VLMRunner:
     runner: VLMRunner | None = getattr(request.app.state, "vlm", None)
@@ -97,22 +99,46 @@ async def _persist_inference(
     repo: GraphRepository,
     *,
     image_id: str,
+    encounter_id: Optional[str],
     inference_id: str,
     model: str,
+    model_version: Optional[str],
     task: str,
     output: str,
     temperature: float,
     idempotency_key: str,
+    ontology_version: Optional[str],
+    image_role: str,
+    encounter_role: str,
+    source_type: Optional[str] = None,
+    source_reference: Optional[str] = None,
 ) -> str:
     timestamp = datetime.now(timezone.utc).isoformat()
     properties = {
         "model": model,
+        "model_version": model_version,
         "task": task,
         "output": output,
         "temperature": float(temperature),
         "timestamp": timestamp,
+        "source_type": source_type,
+        "source_reference": source_reference,
+        "version": ontology_version,
     }
-    edge_properties = {"at": timestamp}
+    edge_properties = {"at": timestamp, "role": image_role}
+
+    provenance: list[tuple[str, str]] = []
+    label_map = {
+        "observation": "Observation",
+        "procedure": "Procedure",
+        "medication": "Medication",
+        "image": "Image",
+    }
+    if source_type and source_reference:
+        label = label_map.get(source_type.lower())
+        if label:
+            provenance.append((label, source_reference))
+
     return await asyncio.to_thread(
         repo.persist_inference,
         image_id=image_id,
@@ -120,6 +146,10 @@ async def _persist_inference(
         properties=properties,
         edge_properties=edge_properties,
         idempotency_key=idempotency_key,
+        encounter_id=encounter_id,
+        encounter_role=encounter_role,
+        ontology_version=ontology_version,
+        provenance=provenance or None,
     )
 
 
@@ -406,22 +436,32 @@ async def run_inference(
         await _persist_inference(
             graph_repo,
             image_id=derived_image_id,
+            encounter_id=encounter_id,
             inference_id=vlm_inference_id,
             model=vlm_result.get("model", ""),
+            model_version=vlm_result.get("model_version"),
             task=task.value,
             output=vlm_output,
             temperature=temperature,
             idempotency_key=f"{vlm_inference_id}:{vlm_key}",
+            ontology_version=ONTOLOGY_VERSION,
+            image_role="vision",
+            encounter_role="vision",
         )
         await _persist_inference(
             graph_repo,
             image_id=derived_image_id,
+            encounter_id=encounter_id,
             inference_id=llm_inference_id,
             model=llm_result.get("model", ""),
+            model_version=llm_result.get("model_version"),
             task=f"{task.value}_analysis",
             output=llm_result.get("output", ""),
             temperature=llm_temperature,
             idempotency_key=f"{llm_inference_id}:{llm_key}",
+            ontology_version=ONTOLOGY_VERSION,
+            image_role="llm",
+            encounter_role="llm",
         )
 
         try:
