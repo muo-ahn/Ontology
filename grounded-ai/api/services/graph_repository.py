@@ -40,8 +40,10 @@ class GraphRepository:
     ) -> None:
         tx = self._graph.begin()
         try:
-            image = Node("Image", image_id=image_id)
-            tx.merge(image, "Image", "image_id")
+            image = Node("Image", id=image_id)
+            tx.merge(image, "Image", "id")
+            image["id"] = image_id
+            image["image_id"] = image_id
             image["file_path"] = file_path
             if modality:
                 image["modality"] = modality
@@ -92,8 +94,10 @@ class GraphRepository:
 
         tx = self._graph.begin()
         try:
-            image = Node("Image", image_id=image_id)
-            tx.merge(image, "Image", "image_id")
+            image = Node("Image", id=image_id)
+            tx.merge(image, "Image", "id")
+            image["id"] = image_id
+            image["image_id"] = image_id
 
             inference = Node("AIInference", inference_id=inference_id)
             tx.merge(inference, "AIInference", "inference_id")
@@ -178,7 +182,7 @@ class GraphRepository:
             "Diagnosis": "diagnosis_id",
             "Procedure": "procedure_id",
             "Medication": "med_id",
-            "Image": "image_id",
+            "Image": "id",
             "Encounter": "encounter_id",
         }
         return mapping.get(label, "id")
@@ -186,7 +190,7 @@ class GraphRepository:
     def set_image_embedding(self, image_id: str, embedding_id: str) -> None:
         self._graph.run(
             """
-            MATCH (img:Image {image_id: $image_id})
+            MATCH (img:Image {id: $image_id})
             SET img.embedding_id = $embedding_id
             """,
             image_id=image_id,

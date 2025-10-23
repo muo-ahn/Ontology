@@ -5,16 +5,24 @@
 - Target hardware: RTX 4070 Laptop GPU and Apple Silicon (M4) with Metal acceleration.
 - Goal: validate the end-to-end orchestration flow (Streamlit UI → FastAPI → vLM → LLM → Neo4j/Qdrant) against a controlled medical dummy dataset.
 
+## TL;DR
+| Mode | Context Source | What it shows |
+|------|----------------|---------------|
+| **V**   | Vision caption only | Fast preview of the raw vLM output. |
+| **VL**  | Caption → LLM prompt | Language polish without graph grounding. |
+| **VGL** | Image ↔ Finding / Report edges | Graph-grounded summary with the lowest hallucination rate. |
+
 ## Quick start
-1. **Start services**
+1. **Clone & enter the project**
+   ```bash
+   git clone https://github.com/<your-org>/Ontology.git
+   cd Ontology/grounded-ai
+   ```
+2. **Start services**
    ```bash
    make up
    ```
-2. **Seed/verify models** (optional if Ollama cache already populated)
-   ```bash
-   make pull
-   ```
-3. **Batch evaluation** (runs V / V+L / V→G→L for all sample images)
+3. **Batch evaluation** (runs V / VL / VGL for all sample images)
    ```bash
    python scripts/run_eval.py --mock
    python scripts/plot_eval.py

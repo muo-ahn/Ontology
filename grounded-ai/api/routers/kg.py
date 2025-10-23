@@ -14,7 +14,7 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-LOCAL_GRAPH_CACHE: dict[str, dict[str, Any]] = {}
+LOCAL_GRAPH_CACHE: dict[str, GraphContextResponse] = {}
 
 UPSERT_QUERY = """
 MERGE (c:Case {id:$case_id})
@@ -88,6 +88,7 @@ class GraphContextResponse(BaseModel):
     image: ImageContext
     findings: list[FindingModel] = Field(default_factory=list)
     reports: list[ReportContext] = Field(default_factory=list)
+    triples: list[str] = Field(default_factory=list, description="Readable triples emphasising the edges used for reasoning.")
 
 
 @router.post("/cypher")
@@ -106,16 +107,18 @@ async def run_cypher(
 def _update_local_cache(data: dict[str, Any]) -> None:
     image = data["image"]
     image_id = image["image_id"]
-    LOCAL_GRAPH_CACHE[image_id] = {
+    record = {
         "case_id": data.get("case_id"),
-        "image": {
-            "image_id": image_id,
-            "path": image.get("path"),
-            "modality": image.get("modality"),
-        },
+        "image_id": image_id,
+        "image_path": image.get("path"),
+        "modality": image.get("modality"),
         "findings": data.get("findings", []),
-        "reports": [data.get("report", {})],
+        "reports": [],
     }
+    report_payload = data.get("report")
+    if report_payload:
+        record["reports"].append(report_payload)
+    LOCAL_GRAPH_CACHE[image_id] = _serialise_context(record)
 
 
 async def upsert_case_payload(payload: KGUpsertRequest, neo4j: Neo4jClient) -> None:
@@ -129,8 +132,47 @@ async def upsert_case_payload(payload: KGUpsertRequest, neo4j: Neo4jClient) -> N
     _update_local_cache(data)
 
 
-def _context_from_local(image_id: str) -> Optional[dict[str, Any]]:
+def _context_from_local(image_id: str) -> Optional[GraphContextResponse]:
     return LOCAL_GRAPH_CACHE.get(image_id)
+
+
+def _build_triples(
+    case_id: Optional[str],
+    image: ImageContext,
+    findings: list[FindingModel],
+    reports: list[ReportContext],
+) -> list[str]:
+    triples: list[str] = []
+    image_ref = f"Image {image.image_id}" if image.image_id else "Image"
+    if case_id:
+        triples.append(f"(Case {case_id}) -[HAS_IMAGE]-> ({image_ref})")
+    for finding in findings:
+        label = finding.type or finding.id
+        props: list[str] = []
+        if finding.location:
+            props.append(f"location={finding.location}")
+        if finding.size_cm is not None:
+            props.append(f"size_cm={finding.size_cm}")
+        if finding.conf is not None:
+            props.append(f"conf={finding.conf:.2f}")
+        node_repr = label
+        if props:
+            node_repr = f"{label} | {' | '.join(props)}"
+        triples.append(f"({image_ref}) -[HAS_FINDING]-> ({node_repr})")
+    for report in reports:
+        label = f"Report {report.id}" if report.id else "Report"
+        props: list[str] = []
+        if report.model:
+            props.append(f"model={report.model}")
+        if report.conf is not None:
+            props.append(f"conf={report.conf:.2f}")
+        if report.ts:
+            props.append(f"ts={report.ts}")
+        node_repr = label
+        if props:
+            node_repr = f"{label} | {' | '.join(props)}"
+        triples.append(f"({image_ref}) -[DESCRIBED_BY]-> ({node_repr})")
+    return triples
 
 
 async def fetch_image_context(image_id: str, neo4j: Neo4jClient) -> GraphContextResponse:
@@ -141,35 +183,63 @@ async def fetch_image_context(image_id: str, neo4j: Neo4jClient) -> GraphContext
         cached = _context_from_local(image_id)
         if not cached:
             raise HTTPException(status_code=503, detail="Knowledge graph unavailable") from exc
-        return _serialise_context(cached)
+        return cached
 
     if not records:
         cached = _context_from_local(image_id)
         if cached:
-            return _serialise_context(cached)
+            return cached
         raise HTTPException(status_code=404, detail="Image context not found")
-    return _serialise_context(records[0])
+    context = _serialise_context(records[0])
+    LOCAL_GRAPH_CACHE[context.image.image_id] = context
+    return context
 
 
 def _serialise_context(record: dict[str, Any]) -> GraphContextResponse:
-    findings = [FindingModel(**finding) for finding in record.get("findings", []) if finding.get("id")]
-    reports = [ReportContext(**report) for report in record.get("reports", []) if report.get("id")]
+    image_data = record.get("image") or {}
+    image_id = record.get("image_id") or image_data.get("image_id") or image_data.get("id")
     image_payload = ImageContext(
-        image_id=record.get("image_id"),
-        path=record.get("image_path") or record.get("image", {}).get("path"),
-        modality=record.get("modality") or record.get("image", {}).get("modality"),
+        image_id=image_id,
+        path=record.get("image_path") or image_data.get("path"),
+        modality=record.get("modality") or image_data.get("modality"),
     )
+
+    findings_raw = record.get("findings") or []
+    findings: list[FindingModel] = []
+    for finding in findings_raw:
+        if not finding:
+            continue
+        if not finding.get("id") or not finding.get("type"):
+            continue
+        findings.append(FindingModel(**finding))
+
+    reports_raw = record.get("reports") or []
+    reports: list[ReportContext] = []
+    for report in reports_raw:
+        if not report:
+            continue
+        if not report.get("id"):
+            continue
+        normalised = dict(report)
+        ts_value = normalised.get("ts")
+        if ts_value is not None and not isinstance(ts_value, str):
+            normalised["ts"] = str(ts_value)
+        reports.append(ReportContext(**normalised))
+
+    triples = _build_triples(record.get("case_id"), image_payload, findings, reports)
+
     return GraphContextResponse(
         case_id=record.get("case_id"),
         image=image_payload,
         findings=findings,
         reports=reports,
+        triples=triples,
     )
 
 
 def _lookup_image_for_case(case_id: str) -> Optional[str]:
     for image_id, payload in LOCAL_GRAPH_CACHE.items():
-        if payload.get("case_id") == case_id:
+        if payload.case_id == case_id:
             return image_id
     return None
 

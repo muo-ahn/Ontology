@@ -22,12 +22,12 @@ from services.llm_runner import LLMRunner
 from services.clip_embedder import ClipEmbedder
 from services.qdrant_client import QdrantVectorStore
 from services.vlm_runner import VLMRunner
-from models.pipeline import FindingModel
+from models.pipeline import FindingModel, ImageModel, ReportModel
 from services.dummy_dataset import (
     build_findings,
+    build_report,
     decode_image_payload,
     default_caption,
-    default_confidence,
     ensure_case_id,
     ensure_image_id,
     lookup_entry,
@@ -262,12 +262,22 @@ class CaptionRequest(BaseModel):
 class CaptionResponse(BaseModel):
     """Structured caption output consumed by downstream stages."""
 
-    image_id: str
-    caption: str
+    image: ImageModel
+    report: ReportModel
     findings: list[FindingModel]
-    model: str
-    confidence: float
-    ts: datetime
+    vlm_latency_ms: int
+
+    @property
+    def image_id(self) -> str:
+        return self.image.image_id
+
+    @property
+    def caption(self) -> str:
+        return self.report.text
+
+    @property
+    def model(self) -> str:
+        return self.report.model
 
 
 async def create_caption_response(
@@ -301,19 +311,38 @@ async def create_caption_response(
 
     caption_text = default_caption(entry, vlm_result.get("output", ""))
     findings = build_findings(image_id, caption_text, entry)
-    confidence = default_confidence(entry)
 
-    response = CaptionResponse(
+    image_path = resolved_path or payload.file_path or f"/data/{image_id}.png"
+    image_model = ImageModel(
+        image_id=image_id,
+        path=image_path,
+        modality=(entry or {}).get("modality"),
+    )
+
+    report_payload = build_report(
         image_id=image_id,
         caption=caption_text,
-        findings=findings,
         model=vlm_result.get("model", runner.model),
-        confidence=confidence,
-        ts=datetime.now(timezone.utc),
+        entry=entry,
+    )
+    report_model = ReportModel(
+        id=report_payload["id"],
+        text=report_payload["text"],
+        model=report_payload["model"],
+        conf=float(report_payload["conf"]),
+        ts=datetime.fromisoformat(report_payload["ts"]),
+    )
+
+    response = CaptionResponse(
+        image=image_model,
+        report=report_model,
+        findings=findings,
+        vlm_latency_ms=int(vlm_result.get("latency_ms", vlm_latency_ms)),
     )
     entry_with_case = dict(entry) if entry else None
     if entry_with_case is not None:
         entry_with_case["case_id"] = ensure_case_id(entry, payload.case_id)
+        entry_with_case.setdefault("report_id", report_model.id)
     return response, entry_with_case, resolved_path, vlm_result
 
 

@@ -129,6 +129,17 @@ def build_findings(image_id: str, caption: str, entry: Optional[dict[str, Any]])
         findings.append(FindingModel(id=f"F_{image_id}_L", type="fatty_liver", location="liver", conf=0.6))
     if "tachycardia" in lower:
         findings.append(FindingModel(id=f"F_{image_id}_T", type="tachycardia", location="heart", conf=0.55))
+    if not findings:
+        fallback_conf = default_confidence(entry)
+        findings.append(
+            FindingModel(
+                id=f"F_{image_id}_OBS",
+                type="observation",
+                location=None,
+                size_cm=None,
+                conf=fallback_conf,
+            )
+        )
     return findings
 
 

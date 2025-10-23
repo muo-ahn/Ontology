@@ -1,4 +1,4 @@
-"""Batch evaluation for the three pipeline variants (V, V+L, V→G→L)."""
+"""Batch evaluation for the three pipeline variants (V, VL, VGL)."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from dummy_dataset import (  # type: ignore  # noqa: E402  (runtime path setup)
 )
 
 
-PIPELINE_MODES = ["V", "V+L", "V→G→L"]
+PIPELINE_MODES = ["V", "VL", "VGL"]
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -142,7 +142,7 @@ def run_case(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate V / V+L / V→G→L pipelines")
+    parser = argparse.ArgumentParser(description="Evaluate V / VL / VGL pipelines")
     parser.add_argument("--api-url", default="http://localhost:8000", help="FastAPI base URL")
     parser.add_argument("--output", default="grounded-ai/results/results.csv", help="Where to write the CSV")
     parser.add_argument("--repeats", type=int, default=3, help="Number of runs per mode")

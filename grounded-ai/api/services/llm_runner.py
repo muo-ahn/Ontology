@@ -67,7 +67,18 @@ class LLMRunner:
             response.raise_for_status()
             return response.json()
 
-        data = await _post()
+        try:
+            data = await _post()
+        except Exception as exc:  # pragma: no cover - network fallback
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            message = f"[mock-llm] {prompt[:200]}"
+            return {
+                "output": message,
+                "model": self.model,
+                "latency_ms": latency_ms,
+                "warning": f"LLM call failed: {exc}",
+            }
+
         latency_ms = int((time.perf_counter() - start) * 1000)
         output = data.get("response") or data.get("result") or ""
         return {
