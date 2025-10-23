@@ -5,6 +5,24 @@
 - Target hardware: RTX 4070 Laptop GPU and Apple Silicon (M4) with Metal acceleration.
 - Goal: validate the end-to-end orchestration flow (Streamlit UI → FastAPI → vLM → LLM → Neo4j/Qdrant) against a controlled medical dummy dataset.
 
+## Quick start
+1. **Start services**
+   ```bash
+   make up
+   ```
+2. **Seed/verify models** (optional if Ollama cache already populated)
+   ```bash
+   make pull
+   ```
+3. **Batch evaluation** (runs V / V+L / V→G→L for all sample images)
+   ```bash
+   python scripts/run_eval.py --mock
+   python scripts/plot_eval.py
+   ```
+   The commands above generate `grounded-ai/results/results.csv` and `grounded-ai/results/results_summary.png`.
+
+When a live API is running (e.g. via `make up`), omit `--mock` to exercise the full FastAPI → Neo4j → Ollama stack.
+
 ## System Architecture
 ```
 [Streamlit UI] → [FastAPI Orchestrator]

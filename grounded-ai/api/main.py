@@ -4,7 +4,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
-from routers import embed, kg, vision
+from routers import embed, kg, llm, vision
 from services.clip_embedder import ClipEmbedder
 from events.bus import EventBus
 from events.tracker import TaskStatusTracker
@@ -69,4 +69,5 @@ async def healthcheck() -> dict[str, str]:
 # Router registration -------------------------------------------------------
 app.include_router(embed.router, prefix="/embed", tags=["embeddings"])
 app.include_router(kg.router, prefix="/kg", tags=["knowledge-graph"])
+app.include_router(llm.router, prefix="/llm", tags=["pipeline"])
 app.include_router(vision.router, prefix="/vision", tags=["vision"])

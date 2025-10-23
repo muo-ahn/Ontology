@@ -1,0 +1,60 @@
+[
+  {
+    "image_id": "IMG_001",
+    "file_name": "img_001.png",
+    "case_id": "C_001",
+    "modality": "XR",
+    "caption": "Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.",
+    "vlm_confidence": 0.83,
+    "findings": [
+      {
+        "id": "F_IMG001_1",
+        "type": "nodule",
+        "location": "RUL",
+        "size_cm": 1.8,
+        "conf": 0.87
+      }
+    ],
+    "llm_summary": "우상엽 1.8cm 결절, CT 추적 권고.",
+    "keywords": ["nodule", "RUL", "1.8"],
+    "blacklist": ["effusion", "atelectasis", "fracture"]
+  },
+  {
+    "image_id": "IMG_002",
+    "file_name": "img_002.png",
+    "case_id": "C_002",
+    "modality": "US",
+    "caption": "Abdominal ultrasound – fatty liver pattern. No gallstones visualized.",
+    "vlm_confidence": 0.79,
+    "findings": [
+      {
+        "id": "F_IMG002_1",
+        "type": "fatty_liver",
+        "location": "liver",
+        "conf": 0.8
+      }
+    ],
+    "llm_summary": "복부초음파 지방간 소견, 담석 없음.",
+    "keywords": ["fatty", "liver"],
+    "blacklist": ["mass", "gallstone", "ascites"]
+  },
+  {
+    "image_id": "IMG_003",
+    "file_name": "img_003.png",
+    "case_id": "C_003",
+    "modality": "ECG",
+    "caption": "ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.",
+    "vlm_confidence": 0.76,
+    "findings": [
+      {
+        "id": "F_IMG003_1",
+        "type": "tachycardia",
+        "location": "heart",
+        "conf": 0.75
+      }
+    ],
+    "llm_summary": "ECG 동율동성 빈맥 약 110bpm, ST 변화 없음.",
+    "keywords": ["tachycardia", "110"],
+    "blacklist": ["fibrillation", "block", "st elevation"]
+  }
+]

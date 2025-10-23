@@ -4,9 +4,10 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
@@ -21,6 +22,16 @@ from services.llm_runner import LLMRunner
 from services.clip_embedder import ClipEmbedder
 from services.qdrant_client import QdrantVectorStore
 from services.vlm_runner import VLMRunner
+from models.pipeline import FindingModel
+from services.dummy_dataset import (
+    build_findings,
+    decode_image_payload,
+    default_caption,
+    default_confidence,
+    ensure_case_id,
+    ensure_image_id,
+    lookup_entry,
+)
 
 
 router = APIRouter()
@@ -28,6 +39,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 ONTOLOGY_VERSION = os.getenv("ONTOLOGY_VERSION", "1.1")
+
+CAPTION_PROMPT = "Summarise the key clinical findings in this medical image."
 
 
 def get_vlm(request: Request) -> VLMRunner:
@@ -229,6 +242,90 @@ async def _store_embeddings(
         )
 
     return results
+
+
+class CaptionRequest(BaseModel):
+    """Payload accepted by the lightweight caption endpoint."""
+
+    image_b64: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded image payload. Mutually exclusive with file_path.",
+    )
+    file_path: Optional[str] = Field(
+        default=None,
+        description="Filesystem path to an image accessible by the API container.",
+    )
+    image_id: Optional[str] = Field(default=None, description="Optional existing image identifier.")
+    case_id: Optional[str] = Field(default=None, description="Optional case identifier for graph persistence.")
+
+
+class CaptionResponse(BaseModel):
+    """Structured caption output consumed by downstream stages."""
+
+    image_id: str
+    caption: str
+    findings: list[FindingModel]
+    model: str
+    confidence: float
+    ts: datetime
+
+
+async def create_caption_response(
+    payload: CaptionRequest,
+    runner: VLMRunner,
+) -> Tuple[CaptionResponse, Optional[dict[str, object]], Optional[str], dict[str, object]]:
+    """Shared captioning helper used by both the API endpoint and the pipeline router."""
+
+    try:
+        image_bytes, resolved_path = decode_image_payload(payload.image_b64, payload.file_path)
+    except FileNotFoundError as exc:  # pragma: no cover - depends on host FS
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    entry = lookup_entry(image_id=payload.image_id, file_path=resolved_path or payload.file_path)
+    image_id = ensure_image_id(entry=entry, explicit_id=payload.image_id, image_bytes=image_bytes)
+
+    vlm_start = time.perf_counter()
+    try:
+        raw_vlm_result = await runner.generate(
+            image_bytes=image_bytes,
+            prompt=CAPTION_PROMPT,
+            task=VLMRunner.Task.CAPTION,
+        )
+    except Exception as exc:  # pragma: no cover - network/runtime issues
+        raise HTTPException(status_code=502, detail="Vision model invocation failed") from exc
+    vlm_latency_ms = int((time.perf_counter() - vlm_start) * 1000)
+    vlm_result = dict(raw_vlm_result)
+    vlm_result.setdefault("latency_ms", vlm_latency_ms)
+
+    caption_text = default_caption(entry, vlm_result.get("output", ""))
+    findings = build_findings(image_id, caption_text, entry)
+    confidence = default_confidence(entry)
+
+    response = CaptionResponse(
+        image_id=image_id,
+        caption=caption_text,
+        findings=findings,
+        model=vlm_result.get("model", runner.model),
+        confidence=confidence,
+        ts=datetime.now(timezone.utc),
+    )
+    entry_with_case = dict(entry) if entry else None
+    if entry_with_case is not None:
+        entry_with_case["case_id"] = ensure_case_id(entry, payload.case_id)
+    return response, entry_with_case, resolved_path, vlm_result
+
+
+@router.post("/caption", response_model=CaptionResponse)
+async def generate_caption(
+    payload: CaptionRequest,
+    runner: VLMRunner = Depends(get_vlm),
+) -> CaptionResponse:
+    """Caption endpoint exposing the minimal contract required by the evaluation scripts."""
+
+    response, _, _, _ = await create_caption_response(payload, runner)
+    return response
 
 
 @router.post("/tasks")

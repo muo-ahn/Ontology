@@ -9,10 +9,8 @@ ON CREATE SET
 
 // 2. Ensure AIInference nodes capture version metadata
 MATCH (inf:AIInference)
-SET inf.version = CASE
-  WHEN inf.version IS NULL THEN '1.1'
-  ELSE toString(inf.version)
-END;
+WHERE inf.version IS NOT NULL
+SET inf.version = toString(inf.version);
 
 // 3. Link AIInference nodes to OntologyVersion for provenance
 MATCH (inf:AIInference)
