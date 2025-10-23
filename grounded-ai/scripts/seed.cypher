@@ -107,13 +107,12 @@ MERGE (enc)-[:HAS_MEDICATION]->(m);
 
 // AI Inferences with provenance & versioning
 WITH [
-  {inference_id:'AI00001', image_id:'IMG001', encounter_id:'E0003', model:'llava-1.5-7b', model_version:'v1.0', task:'caption', output:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.', confidence:0.91, timestamp:'2025-10-10T12:00:00', source_type:'observation', source_reference:'O00004', role:'vision'},
-  {inference_id:'AI00002', image_id:'IMG002', encounter_id:'E0006', model:'llava-1.5-7b', model_version:'v1.0', task:'caption', output:'Abdominal ultrasound – fatty liver pattern. No gallstones visualized.', confidence:0.85, timestamp:'2025-10-10T12:00:00', source_type:'procedure', source_reference:'PR0003', role:'vision'},
-  {inference_id:'AI00003', image_id:'IMG003', encounter_id:'E0005', model:'qwen2-vl:2b', model_version:'v0.9', task:'caption', output:'ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.', confidence:0.79, timestamp:'2025-10-10T12:00:00', source_type:'observation', source_reference:'O00003', role:'vision'}
+  {inference_id:'AI00001', image_id:'IMG001', encounter_id:'E0003', model:'llava-1.5-7b', model_version:'v1.0', task:'caption', output:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.', confidence:0.91, timestamp:'2025-10-10T12:00:00', source_type:'observation', source_reference:'O00004', role:'vision'}
 ] AS rows
 UNWIND rows AS r
 MATCH (enc:Encounter {encounter_id:r.encounter_id})
 MATCH (img:Image {image_id:r.image_id})
+MATCH (ov:OntologyVersion {version_id:'1.1'})
 MERGE (ai:AIInference {inference_id:r.inference_id})
 SET ai += {
   model:r.model,

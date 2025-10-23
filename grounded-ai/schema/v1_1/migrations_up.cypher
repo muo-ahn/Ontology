@@ -8,14 +8,14 @@ ON CREATE SET
 ;
 
 // 2. Ensure AIInference nodes capture version metadata
-MATCH (inf:AIInference)
-WHERE inf.version IS NOT NULL
-SET inf.version = toString(inf.version);
+MATCH (inference:AIInference)
+WHERE inference.version IS NULL
+SET inference.version = '1.1';
 
 // 3. Link AIInference nodes to OntologyVersion for provenance
-MATCH (inf:AIInference)
+MATCH (inference:AIInference)
 MATCH (v:OntologyVersion {version_id: '1.1'})
-MERGE (inf)-[:RECORDED_WITH]->(v);
+MERGE (inference)-[:RECORDED_WITH]->(v);
 ;
 
 // 4. Normalize encounter timestamps (ensure end_at exists)

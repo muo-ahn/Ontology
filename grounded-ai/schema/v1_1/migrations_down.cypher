@@ -5,9 +5,9 @@ MATCH (:AIInference)-[rel:RECORDED_WITH]->(:OntologyVersion {version_id: '1.1'})
 DELETE rel;
 
 // 2. Remove version property set by migration
-MATCH (inf:AIInference)
-WHERE inf.version = '1.1'
-REMOVE inf.version;
+MATCH (inference:AIInference)
+WHERE inference.version = '1.1'
+REMOVE inference.version;
 
 // 3. Restore encounters whose end_at was populated by migration
 MATCH (enc:Encounter)
