@@ -51,50 +51,79 @@
 curl http://localhost:8000/health
 ```
 
-### 2. 동기식 파이프라인 (즉시 응답)
-- **VLM + LLM 실행 (그래프 저장 안 함)**
-  ```sh
-  curl -X POST http://localhost:8000/vision/inference \
-    -F "prompt=Summarize the key findings in this X-ray." \
-    -F "image=@grounded-ai/data/medical_dummy/images/img_001.png" \
-    -F "persist=false"
-  ```
-- **그래프까지 업서트**
-  ```sh
-  curl -X POST http://localhost:8000/vision/inference \
-    -F "prompt=Summarize the key findings in this image." \
-    -F "llm_prompt=Given the vision summary, what should the clinician do next?" \
-    -F "image=@grounded-ai/data/medical_dummy/images/img_003.png" \
-    -F "modality=XR" \
-    -F "patient_id=P9999" \
-    -F "encounter_id=E9999" \
-    -F "persist=true" \
-    -F "idempotency_key=demo-sync-001"
-  ```
+### 2. vLM 캡션 정규화 (이미지 → JSON)
+```sh
+curl -X POST http://localhost:8000/vision/caption \
+  -H "Content-Type: application/json" \
+  -d '{
+        "file_path": "grounded-ai/data/medical_dummy/images/img_001.png",
+        "image_id": "IMG_001"
+      }'
+```
+- 응답: `image`, `report`, `findings[]` 필드를 포함한 표준 JSON.
 
-### 3. 비동기 파이프라인 (Redis Streams + SSE)
+### 3. 그래프 업서트 (노드 + 엣지 강제 생성)
+```sh
+curl -X POST http://localhost:8000/kg/upsert \
+  -H "Content-Type: application/json" \
+  -d '{
+        "case_id": "CASE_DEMO_001",
+        "image": {
+          "image_id": "IMG_001",
+          "path": "/data/img_001.png",
+          "modality": "XR"
+        },
+        "report": {
+          "id": "rep_demo_001",
+          "text": "Chest X-ray – probable RUL nodule (~1.8 cm).",
+          "model": "qwen2-vl",
+          "conf": 0.83,
+          "ts": "2025-10-23T12:00:00Z"
+        },
+        "findings": [
+          {
+            "id": "find_demo_001",
+            "type": "nodule",
+            "location": "RUL",
+            "size_cm": 1.8,
+            "conf": 0.87
+          }
+        ]
+      }'
+```
+- `HAS_IMAGE`, `HAS_FINDING`, `DESCRIBED_BY` 엣지가 모두 생성되는지 확인할 수 있다.
+
+### 4. 그래프 컨텍스트 조회 (엣지 기반 직렬화)
+```sh
+curl "http://localhost:8000/kg/context?image_id=IMG_001"
+```
+- 응답: `findings`, `reports` 뿐 아니라 사람이 읽기 좋은 `triples[]` 포함.
+
+### 5. LLM 최종 소견 (V / VL / VGL 비교)
+```sh
+curl -X POST http://localhost:8000/llm/answer \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "VGL", "image_id": "IMG_001", "style": "one_line"}'
+```
+- `mode` 조회: `V`(vLM 캡션), `VL`(캡션→LLM), `VGL`(그래프 컨텍스트 기반).
+
+### 6. 비동기 파이프라인 (선택)
 1. **작업 생성**
    ```sh
    curl -X POST http://localhost:8000/vision/tasks \
      -F "prompt=Summarize the key findings in this X-ray." \
-     -F "llm_prompt=Given the vision summary, what should the clinician do next?" \
-     -F "image=@grounded-ai/data/medical_dummy/images/img_001.png" \
+     -F "image=@grounded-ai/data/medical_dummy/images/img_002.png" \
      -F "persist=true"
    ```
-   → `task_id` / `status_endpoint` 가 응답으로 돌아온다.
-
-2. **상태 스트림 구독 (Server-Sent Events)**
+2. **SSE 스트림 감시**
    ```sh
    curl -N http://localhost:8000/vision/tasks/<task_id>/events
    ```
-   Redis Streams 기반 워커가 `queued → vision → llm → persisted` 순서로 이벤트를 푸시한다.
+   → Redis Streams 워커가 `queued → vision → graph → llm` 순으로 이벤트를 보낸다.
 
-### 4. 그래프 질의 샘플
+### 7. 추가 그래프 질의
 ```sh
 curl -X POST http://localhost:8000/kg/cypher \
-     -H 'Content-Type: application/json' \
-     -d '{"query": "MATCH (p:Patient) RETURN p.patient_id LIMIT 5"}'
-```
-```sh
-curl http://localhost:8000/kg/patient/P1005
+  -H "Content-Type: application/json" \
+  -d '{"query": "MATCH (i:Image)-[r:HAS_FINDING]->(f:Finding) RETURN i.id AS image, f.type AS finding LIMIT 5"}'
 ```

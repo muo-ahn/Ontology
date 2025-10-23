@@ -31,6 +31,65 @@
 
 When a live API is running (e.g. via `make up`), omit `--mock` to exercise the full FastAPI → Neo4j → Ollama stack.
 
+## API smoke test (cURL)
+Make sure `make up` (or `docker compose up`) is running, then walk through the edge-centric flow.
+
+1. **Normalise a vision caption**
+   ```bash
+   curl -X POST http://localhost:8000/vision/caption \
+     -H "Content-Type: application/json" \
+     -d '{
+           "file_path": "grounded-ai/data/medical_dummy/images/img_001.png",
+           "image_id": "IMG_001"
+         }'
+   ```
+   Returns canonical `image`/`report`/`findings[]` blocks.
+
+2. **Persist to the knowledge graph**
+   ```bash
+   curl -X POST http://localhost:8000/kg/upsert \
+     -H "Content-Type: application/json" \
+     -d '{
+           "case_id": "CASE_DEMO_001",
+           "image": {
+             "image_id": "IMG_001",
+             "path": "/data/img_001.png",
+             "modality": "XR"
+           },
+           "report": {
+             "id": "rep_demo_001",
+             "text": "Chest X-ray – probable RUL nodule (~1.8 cm).",
+             "model": "qwen2-vl",
+             "conf": 0.83,
+             "ts": "2025-10-23T12:00:00Z"
+           },
+           "findings": [
+             {
+               "id": "find_demo_001",
+               "type": "nodule",
+               "location": "RUL",
+               "size_cm": 1.8,
+               "conf": 0.87
+             }
+           ]
+         }'
+   ```
+   Confirms `HAS_IMAGE`, `HAS_FINDING`, and `DESCRIBED_BY` edges are created.
+
+3. **Fetch graph-grounded context**
+   ```bash
+   curl "http://localhost:8000/kg/context?image_id=IMG_001"
+   ```
+   Provides structured `findings`, `reports`, and human-friendly `triples[]`.
+
+4. **Generate the final one-line impression**
+   ```bash
+   curl -X POST http://localhost:8000/llm/answer \
+     -H "Content-Type: application/json" \
+     -d '{"mode": "VGL", "image_id": "IMG_001", "style": "one_line"}'
+   ```
+   Swap `mode` between `V`, `VL`, and `VGL` to compare hallucination and consistency.
+
 ## System Architecture
 ```
 [Streamlit UI] → [FastAPI Orchestrator]
