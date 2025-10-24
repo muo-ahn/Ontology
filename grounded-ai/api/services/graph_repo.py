@@ -8,8 +8,12 @@ import os
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
+import logging
+
 from neo4j import GraphDatabase  # type: ignore
 from neo4j.exceptions import Neo4jError  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 UPSERT_CASE_QUERY = """
 MERGE (c:Case {id:$case_id})
@@ -90,8 +94,16 @@ class GraphRepo:
         if not self._driver:
             raise RuntimeError("Neo4j driver not initialised")
         with self._driver.session(database=self._database) as session:
-            result = session.execute_read(lambda tx: tx.run(query, parameters))
-            return [record.data() for record in result]
+            def _work(tx):
+                result = tx.run(query, parameters)
+                payload = [record.data() for record in result]
+                return payload
+
+            try:
+                return session.execute_read(_work)
+            except Exception:
+                logger.exception("Neo4j read query failed: %s params=%s", query.strip().splitlines()[0], parameters)
+                raise
 
     def _prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = deepcopy(payload)

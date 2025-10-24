@@ -24,7 +24,7 @@ def _print_section(title: str, payload: Any) -> None:
         print(payload)
 
 
-def _ensure_id(path: Path) -> str:
+def _ensure_image_id(path: Path) -> str:
     stem = path.stem.upper()
     if not stem.startswith("IMG"):
         return f"IMG_{stem}"
@@ -57,26 +57,26 @@ def _load_ground_truth() -> Dict[str, Dict[str, Any]]:
     data = json.loads(GROUND_TRUTH_FILE.read_text(encoding="utf-8"))
     records: Dict[str, Dict[str, Any]] = {}
     for entry in data:
-        id = entry.get("id") or entry.get("id")
-        if not id:
+        image_id = entry.get("image_id") or entry.get("id")
+        if not image_id:
             continue
-        records[id.upper()] = entry
+        records[image_id.upper()] = entry
     _GROUND_TRUTH_CACHE = records
     return records
 
 
-def _fallback_caption(id: str, image_path: Path) -> Dict[str, Any]:
+def _fallback_caption(image_id: str, image_path: Path) -> Dict[str, Any]:
     ground_truth = _load_ground_truth()
-    entry = ground_truth.get(id.upper())
+    entry = ground_truth.get(image_id.upper())
     if not entry:
-        raise RuntimeError(f"No ground-truth entry available for id={id}")
+        raise RuntimeError(f"No ground-truth entry available for id={image_id}")
 
     findings = entry.get("findings", [])
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     caption_data = {
-        "image": {"id": id, "path": f"/data/{image_path.name}", "modality": entry.get("modality")},
+        "image": {"id": image_id, "path": f"/data/{image_path.name}", "modality": entry.get("modality")},
         "report": {
-            "id": entry.get("report_id", f"r_{id.lower()}_dummy"),
+            "id": entry.get("report_id", f"r_{image_id.lower()}_dummy"),
             "text": entry.get("caption", ""),
             "model": entry.get("vlm_model", "mock-vlm"),
             "conf": entry.get("vlm_confidence", 0.75),
@@ -105,8 +105,8 @@ def main() -> int:
     if not image_path.exists():
         raise SystemExit(f"image not found: {image_path}")
 
-    id = _ensure_id(image_path)
-    case_id = args.case_id or f"C_{id}"
+    image_id = _ensure_image_id(image_path)
+    case_id = args.case_id or f"C_{image_id}"
     base_url = args.api_url.rstrip("/")
 
     with httpx.Client(base_url=base_url, timeout=args.timeout) as client:
@@ -121,7 +121,7 @@ def main() -> int:
 
         caption_payload = {
             "image_b64": image_b64,
-            "id": id,
+            "id": image_id,
             "case_id": case_id,
         }
         try:
@@ -130,7 +130,7 @@ def main() -> int:
         except httpx.HTTPStatusError as exc:
             body_preview = exc.response.text[:500]
             print(f"[WARN] /vision/caption failed ({exc.response.status_code}): {body_preview}")
-            caption_data = _fallback_caption(id, image_path)
+            caption_data = _fallback_caption(image_id, image_path)
             _print_section("POST /vision/caption (mock fallback)", caption_data)
         else:
             caption_data = caption_resp.json()
@@ -143,11 +143,11 @@ def main() -> int:
         _print_section("POST /graph/upsert", upsert_resp.json())
 
         # 4. /graph/context (triples + json)
-        context_resp = client.get("/graph/context", params={"id": id, "mode": "triples", "k": 2})
+        context_resp = client.get("/graph/context", params={"id": image_id, "mode": "triples", "k": 2})
         context_resp.raise_for_status()
         _print_section("GET /graph/context (mode=triples)", context_resp.json())
 
-        context_json_resp = client.get("/graph/context", params={"id": id, "mode": "json", "k": 2})
+        context_json_resp = client.get("/graph/context", params={"id": image_id, "mode": "json", "k": 2})
         context_json_resp.raise_for_status()
         _print_section("GET /graph/context (mode=json)", context_json_resp.json())
 
@@ -156,19 +156,19 @@ def main() -> int:
 
         v_resp = client.post(
             "/llm/answer",
-            json={"mode": "V", "id": id, "caption": caption_text, "style": "one_line"},
+            json={"mode": "V", "id": image_id, "caption": caption_text, "style": "one_line"},
         )
         v_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=V)", v_resp.json())
 
-        vl_payload = {"mode": "VL", "id": id, "caption": caption_text, "style": "one_line"}
+        vl_payload = {"mode": "VL", "id": image_id, "caption": caption_text, "style": "one_line"}
         vl_resp = client.post("/llm/answer", json=vl_payload)
         vl_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=VL)", vl_resp.json())
 
         vgl_resp = client.post(
             "/llm/answer",
-            json={"mode": "VGL", "id": id, "style": "one_line"},
+            json={"mode": "VGL", "id": image_id, "style": "one_line"},
         )
         vgl_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=VGL)", vgl_resp.json())
