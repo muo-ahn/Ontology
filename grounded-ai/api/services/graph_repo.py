@@ -18,10 +18,16 @@ logger = logging.getLogger(__name__)
 UPSERT_CASE_QUERY = """
 MERGE (c:Case {id:$case_id})
 MERGE (i:Image {id:$image.id})
-ON CREATE SET i.path=$image.path, i.modality=$image.modality
+SET i.path=$image.path, i.modality=$image.modality
 MERGE (c)-[:HAS_IMAGE]->(i)
 MERGE (r:Report {id:$report.id})
-SET r.text=$report.text, r.model=$report.model, r.conf=$report.conf, r.ts=datetime($report.ts)
+SET r.text=$report.text, r.model=$report.model, r.conf=$report.conf
+FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [] ELSE [1] END |
+  SET r.ts = datetime($report_ts)
+)
+FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [1] ELSE [] END |
+  REMOVE r.ts
+)
 MERGE (i)-[:DESCRIBED_BY]->(r)
 FOREACH (f IN $findings |
   MERGE (fd:Finding {id:f.id})
@@ -109,21 +115,31 @@ class GraphRepo:
         data = deepcopy(payload)
 
         image = data.get("image") or {}
-        if "id" not in image:
-            if "id" in image:
-                image["id"] = image["id"]
-            else:
-                raise ValueError("image.id or image.id is required")
+        image_id = image.get("id")
+        if not image_id:
+            raise ValueError("image.id is required")
         data["image"] = image
 
         report = data.get("report") or {}
-        ts_value = report.get("ts")
+        report_conf = report.get("conf")
+        if report_conf is not None:
+            report["conf"] = float(report_conf)
+
+        ts_value = report.pop("ts", None)
         if ts_value is not None and not isinstance(ts_value, str):
-            report["ts"] = ts_value.isoformat()
+            ts_value = ts_value.isoformat()
+        data["report_ts"] = ts_value
         data["report"] = report
 
-        findings = data.get("findings") or []
-        data["findings"] = [dict(finding) for finding in findings]
+        findings = []
+        for finding in data.get("findings") or []:
+            finding_dict = dict(finding)
+            if finding_dict.get("conf") is not None:
+                finding_dict["conf"] = float(finding_dict["conf"])
+            if finding_dict.get("size_cm") is not None:
+                finding_dict["size_cm"] = float(finding_dict["size_cm"])
+            findings.append(finding_dict)
+        data["findings"] = findings
 
         return data
 
