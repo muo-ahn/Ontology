@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Optional, Tuple
 from uuid import uuid4
 
@@ -22,16 +23,13 @@ from services.llm_runner import LLMRunner
 from services.clip_embedder import ClipEmbedder
 from services.qdrant_client import QdrantVectorStore
 from services.vlm_runner import VLMRunner
-from models.pipeline import FindingModel, ImageModel, ReportModel
 from services.dummy_dataset import (
-    build_findings,
-    build_report,
     decode_image_payload,
-    default_caption,
     ensure_case_id,
     ensure_id,
     lookup_entry,
 )
+from services.normalizer import normalize_from_vlm
 
 
 router = APIRouter()
@@ -41,31 +39,6 @@ logger = logging.getLogger(__name__)
 ONTOLOGY_VERSION = os.getenv("ONTOLOGY_VERSION", "1.1")
 
 CAPTION_PROMPT = "Summarise the key clinical findings in this medical image."
-
-
-def _normalise_component(value: Optional[str]) -> str:
-    if value is None:
-        return "na"
-    return value.strip().lower() or "na"
-
-
-def _size_component(size_cm: Optional[float]) -> str:
-    if size_cm is None:
-        return "na"
-    return f"{round(float(size_cm), 1):.1f}"
-
-
-def _generate_finding_id(id: str, finding: FindingModel) -> str:
-    base = "|".join(
-        [
-            id.strip().lower(),
-            (finding.type or "").strip().lower(),
-            _normalise_component(finding.location),
-            _size_component(finding.size_cm),
-        ]
-    )
-    digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
-    return f"f_{digest}"
 
 
 def get_vlm(request: Request) -> VLMRunner:
@@ -339,6 +312,56 @@ class CaptionResponse(BaseModel):
     vlm_latency_ms: int
 
 
+def _build_caption_report(
+    report_payload: dict[str, object],
+    runner: VLMRunner,
+    fallback_caption: Optional[str],
+) -> CaptionReport:
+    text_raw = report_payload.get("text")
+    text = str(text_raw).strip() if isinstance(text_raw, (str, bytes)) else ""
+    if not text:
+        text = (fallback_caption or "").strip()
+    if not text:
+        raise HTTPException(status_code=502, detail="VLM returned empty caption")
+
+    model_value = report_payload.get("model")
+    model_name = str(model_value).strip() if isinstance(model_value, str) else None
+    if not model_name:
+        model_name = runner.model
+
+    conf_value = report_payload.get("conf")
+    try:
+        conf = float(conf_value) if conf_value is not None else 0.8
+    except (TypeError, ValueError):
+        conf = 0.8
+    conf = max(0.0, min(1.0, conf))
+
+    ts_value = report_payload.get("ts")
+    if isinstance(ts_value, datetime):
+        ts_dt = ts_value.astimezone(timezone.utc)
+    elif isinstance(ts_value, str) and ts_value:
+        try:
+            ts_dt = datetime.fromisoformat(ts_value)
+        except ValueError:
+            ts_dt = datetime.now(timezone.utc)
+    else:
+        ts_dt = datetime.now(timezone.utc)
+    ts_iso = ts_dt.astimezone(timezone.utc).isoformat()
+
+    report_id = report_payload.get("id")
+    if not report_id:
+        seed = f"{text}|{model_name}"
+        report_id = "R_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+
+    return CaptionReport(
+        id=str(report_id),
+        text=text,
+        model=model_name,
+        conf=conf,
+        ts=ts_iso,
+    )
+
+
 async def create_caption_response(
     payload: CaptionRequest,
     runner: VLMRunner,
@@ -354,80 +377,82 @@ async def create_caption_response(
 
     entry = lookup_entry(id=payload.id, file_path=resolved_path or payload.file_path)
     id = ensure_id(entry=entry, explicit_id=payload.id, image_bytes=image_bytes)
+    temp_file: Optional[str] = None
+    image_path_for_vlm = resolved_path or payload.file_path
+    if image_path_for_vlm is None:
+        suffix = Path(payload.file_path or f"{id}.png").suffix or ".png"
+        with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(image_bytes)
+            temp_file = tmp.name
+        image_path_for_vlm = temp_file
 
-    vlm_start = time.perf_counter()
     try:
-        raw_vlm_result = await runner.generate(
-            image_bytes=image_bytes,
-            prompt=CAPTION_PROMPT,
-            task=VLMRunner.Task.CAPTION,
+        normalized = await normalize_from_vlm(
+            file_path=image_path_for_vlm,
+            image_id=id,
+            vlm_runner=runner,
         )
-    except Exception as exc:  # pragma: no cover - network/runtime issues
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - runtime issues
         raise HTTPException(status_code=502, detail="Vision model invocation failed") from exc
-    vlm_latency_ms = int((time.perf_counter() - vlm_start) * 1000)
-    vlm_result = dict(raw_vlm_result)
-    vlm_result.setdefault("latency_ms", vlm_latency_ms)
+    finally:
+        if temp_file:
+            try:
+                os.unlink(temp_file)
+            except OSError:
+                pass
 
-    caption_text = default_caption(entry, vlm_result.get("output", ""))
-    findings = build_findings(id, caption_text, entry)
+    normalized_image = dict(normalized.get("image") or {})
+    normalized_report = dict(normalized.get("report") or {})
+    normalized_findings = list(normalized.get("findings") or [])
+    raw_vlm = dict(normalized.get("raw_vlm") or {})
 
-    image_path = resolved_path or payload.file_path or f"/data/{id}.png"
-    image_model = ImageModel(
-        image_id=id,
-        path=image_path,
-        modality=(entry or {}).get("modality"),
-    )
+    image_path = resolved_path or payload.file_path or normalized_image.get("path") or f"/data/{id}.png"
+    modality = normalized_image.get("modality") or (entry or {}).get("modality")
 
-    report_payload = build_report(
-        id=id,
-        caption=caption_text,
-        model=vlm_result.get("model", runner.model),
-        entry=entry,
-    )
-    report_model = ReportModel(
-        id=report_payload["id"],
-        text=report_payload["text"],
-        model=report_payload["model"],
-        conf=float(report_payload["conf"]),
-        ts=datetime.fromisoformat(report_payload["ts"]),
-    )
+    image_identifier = normalized_image.get("image_id") or id
+    image_model = CaptionImage(id=str(image_identifier), path=image_path, modality=modality)
+
+    report_model = _build_caption_report(normalized_report, runner, normalized.get("caption"))
 
     response_findings: list[CaptionFinding] = []
-    for finding in findings:
-        finding_id = _generate_finding_id(id, finding)
-        location_value = finding.location.strip() if isinstance(finding.location, str) else finding.location
-        location_normalised = location_value or None
+    for item in normalized_findings:
+        if not isinstance(item, dict):
+            continue
+        fid = item.get("id")
+        ftype = item.get("type")
+        if not fid or not ftype:
+            continue
+        conf = item.get("conf")
+        conf_value = float(conf) if conf is not None else None
+        size_cm = item.get("size_cm")
+        size_value = float(size_cm) if size_cm is not None else None
         response_findings.append(
             CaptionFinding(
-                id=finding_id,
-                type=finding.type,
-                conf=finding.conf,
-                location=location_normalised,
-                size_cm=finding.size_cm,
+                id=str(fid),
+                type=str(ftype),
+                conf=conf_value,
+                location=item.get("location"),
+                size_cm=size_value,
             )
         )
 
-        response = CaptionResponse(
-            image=CaptionImage(
-                id=image_model.image_id,
-                path=image_model.path,
-                modality=image_model.modality,
-            ),
-        report=CaptionReport(
-            id=report_model.id,
-            text=report_model.text,
-            model=report_model.model,
-            conf=report_model.conf,
-            ts=report_model.ts.isoformat(),
-        ),
+    vlm_latency_ms = int(normalized.get("vlm_latency_ms") or raw_vlm.get("latency_ms") or 0)
+
+    response = CaptionResponse(
+        image=image_model,
+        report=report_model,
         findings=response_findings,
-        vlm_latency_ms=int(vlm_result.get("latency_ms", vlm_latency_ms)),
+        vlm_latency_ms=vlm_latency_ms,
     )
     entry_with_case = dict(entry) if entry else None
     if entry_with_case is not None:
         entry_with_case["case_id"] = ensure_case_id(entry, payload.case_id)
         entry_with_case.setdefault("report_id", report_model.id)
-    return response, entry_with_case, resolved_path, vlm_result
+    return response, entry_with_case, resolved_path, raw_vlm
 
 
 @router.post("/caption", response_model=CaptionResponse)

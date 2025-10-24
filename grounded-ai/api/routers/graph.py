@@ -9,7 +9,7 @@ from hashlib import sha1
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, condecimal, confloat, constr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, condecimal, confloat, constr
 
 from services.context_pack import GraphContextBuilder
 from services.graph_repo import GraphRepo
@@ -27,17 +27,9 @@ class FindingIn(BaseModel):
 class ImageIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    image_id: constr(strip_whitespace=True, min_length=1)
+    image_id: constr(strip_whitespace=True, min_length=1) = Field(alias="id")
     path: Optional[str]
     modality: Optional[str]
-
-    @model_validator(mode="before")
-    @classmethod
-    def _promote_legacy_id(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "image_id" not in data and data.get("id"):
-            data = dict(data)
-            data["image_id"] = data["id"]
-        return data
 
 
 class ReportIn(BaseModel):

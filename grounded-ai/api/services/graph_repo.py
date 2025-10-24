@@ -72,7 +72,7 @@ FACTS_QUERY = """
 MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
 RETURN i.image_id AS image_id,
-       collect({type:f.type, location:a.name, size_cm:f.size_cm, conf:f.conf}) AS findings
+       collect({type:f.type, location:coalesce(a.name, f.location), size_cm:f.size_cm, conf:f.conf}) AS findings
 """
 
 
