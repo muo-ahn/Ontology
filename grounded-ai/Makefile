@@ -12,7 +12,8 @@ QDRANT_URL = http://qdrant:6333
 NEO4J_SVC ?= neo4j 
 IMPORT_DIR ?= /var/lib/neo4j/import
 HOST_DATA    ?= ./data/medical_dummy
-CYpher_FILE  ?= ./scripts/load_all.cypher
+CYpher_FILE  ?= ./scripts/seed.cypher
+CYpher_FILE_load_all  ?= ./scripts/load_all.cypher
 
 # ------------------------------------------
 # 기본 명령
@@ -97,11 +98,11 @@ db-cp:
 
 ## Cypher 스크립트 실행(파일 기반; docker cp + exec)
 db-load:
-	@echo "🧠 Running Cypher LOAD CSV from $(CYpher_FILE)..."
-	@[ -f $(CYpher_FILE) ] || { echo "❌ $(CYpher_FILE) not found. Create scripts/load_all.cypher first."; exit 1; }
+	@echo "🧠 Running Cypher LOAD CSV from $(CYpher_FILE_load_all)..."
+	@[ -f $(CYpher_FILE_load_all) ] || { echo "❌ $(CYpher_FILE_load_all) not found. Create scripts/load_all.cypher first."; exit 1; }
 	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
 	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
-	docker cp $(CYpher_FILE) $$cid:/tmp/load_all.cypher; \
+	docker cp $(CYpher_FILE_load_all) $$cid:/tmp/load_all.cypher; \
 	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/load_all.cypher; \
 	docker exec -t $$cid rm -f /tmp/load_all.cypher; \
 	echo "✅ Neo4j LOAD CSV done."

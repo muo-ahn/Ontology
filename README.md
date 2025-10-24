@@ -46,6 +46,10 @@
 
 ## How to Try It
 
+> **TL;DR template**  
+> `VGL이 V/VL 대비 평균 일관성 +X%, 환각률 -Y% (더미셋 기준)`
+> (실험 실행 후 `scripts/run_eval.py` 결과로 X/Y를 채워 넣으세요.)
+
 ### 1. 건강 상태 확인
 ```sh
 curl http://localhost:8000/health
@@ -60,16 +64,24 @@ curl -X POST http://localhost:8000/vision/caption \
         "image_id": "IMG_001"
       }'
 ```
-- 응답: `image`, `report`, `findings[]` 필드를 포함한 표준 JSON.
+- 응답 예시:
+  ```json
+  {
+    "image": {"id":"IMG_001","path":"/data/img_001.png","modality":"XR"},
+    "report":{"id":"r_83fd0c4a","text":"Chest X-ray – probable right upper lobe nodule (~1.8 cm).","model":"qwen2-vl","conf":0.83,"ts":"2025-10-23T12:00:00.000000+00:00"},
+    "findings":[{"id":"f_1c72a5aa2a5d","type":"nodule","location":"RUL","size_cm":1.8,"conf":0.87}],
+    "vlm_latency_ms": 742
+  }
+  ```
 
 ### 3. 그래프 업서트 (노드 + 엣지 강제 생성)
 ```sh
-curl -X POST http://localhost:8000/kg/upsert \
+curl -X POST http://localhost:8000/graph/upsert \
   -H "Content-Type: application/json" \
   -d '{
         "case_id": "CASE_DEMO_001",
         "image": {
-          "image_id": "IMG_001",
+          "id": "IMG_001",
           "path": "/data/img_001.png",
           "modality": "XR"
         },
@@ -82,22 +94,22 @@ curl -X POST http://localhost:8000/kg/upsert \
         },
         "findings": [
           {
-            "id": "find_demo_001",
-            "type": "nodule",
-            "location": "RUL",
-            "size_cm": 1.8,
-            "conf": 0.87
-          }
-        ]
-      }'
+          "id": "f_1c72a5aa2a5d",
+          "type": "nodule",
+          "location": "RUL",
+          "size_cm": 1.8,
+          "conf": 0.87
+        }
+      ]
+    }'
 ```
-- `HAS_IMAGE`, `HAS_FINDING`, `DESCRIBED_BY` 엣지가 모두 생성되는지 확인할 수 있다.
+- 업서트는 `HAS_IMAGE`, `HAS_FINDING`, `DESCRIBED_BY` 엣지를 모두 포함한다.
 
 ### 4. 그래프 컨텍스트 조회 (엣지 기반 직렬화)
 ```sh
-curl "http://localhost:8000/kg/context?image_id=IMG_001"
+curl "http://localhost:8000/graph/context?image_id=IMG_001&mode=triples&k=2"
 ```
-- 응답: `findings`, `reports` 뿐 아니라 사람이 읽기 좋은 `triples[]` 포함.
+- 응답은 `[EDGE SUMMARY]`, `[EVIDENCE PATHS]`, `[FACTS JSON]` 섹션이 포함된 단일 문자열. `mode=json`으로 호출하면 Facts JSON만 반환된다.
 
 ### 5. LLM 최종 소견 (V / VL / VGL 비교)
 ```sh
@@ -105,7 +117,9 @@ curl -X POST http://localhost:8000/llm/answer \
   -H "Content-Type: application/json" \
   -d '{"mode": "VGL", "image_id": "IMG_001", "style": "one_line"}'
 ```
-- `mode` 조회: `V`(vLM 캡션), `VL`(캡션→LLM), `VGL`(그래프 컨텍스트 기반).
+- `mode`: `V`(vLM 캡션 정제), `VL`(캡션→LLM), `VGL`(그래프 컨텍스트 기반).
+- `VL` 요청 시에는 `caption` 필드를 함께 전달해야 한다.
+- 응답 형식: `{"answer": "...", "latency_ms": ...}`.
 
 ### 6. 비동기 파이프라인 (선택)
 1. **작업 생성**
@@ -123,7 +137,7 @@ curl -X POST http://localhost:8000/llm/answer \
 
 ### 7. 추가 그래프 질의
 ```sh
-curl -X POST http://localhost:8000/kg/cypher \
+curl -X POST http://localhost:8000/graph/cypher \
   -H "Content-Type: application/json" \
   -d '{"query": "MATCH (i:Image)-[r:HAS_FINDING]->(f:Finding) RETURN i.id AS image, f.type AS finding LIMIT 5"}'
 ```

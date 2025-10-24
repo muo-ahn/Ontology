@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_serializer
 
 from events.bus import EventBus
 from events.constants import IMAGE_RECEIVED_STREAM
@@ -41,6 +41,31 @@ logger = logging.getLogger(__name__)
 ONTOLOGY_VERSION = os.getenv("ONTOLOGY_VERSION", "1.1")
 
 CAPTION_PROMPT = "Summarise the key clinical findings in this medical image."
+
+
+def _normalise_component(value: Optional[str]) -> str:
+    if value is None:
+        return "na"
+    return value.strip().lower() or "na"
+
+
+def _size_component(size_cm: Optional[float]) -> str:
+    if size_cm is None:
+        return "na"
+    return f"{round(float(size_cm), 1):.1f}"
+
+
+def _generate_finding_id(image_id: str, finding: FindingModel) -> str:
+    base = "|".join(
+        [
+            image_id.strip().lower(),
+            (finding.type or "").strip().lower(),
+            _normalise_component(finding.location),
+            _size_component(finding.size_cm),
+        ]
+    )
+    digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+    return f"f_{digest}"
 
 
 def get_vlm(request: Request) -> VLMRunner:
@@ -259,25 +284,59 @@ class CaptionRequest(BaseModel):
     case_id: Optional[str] = Field(default=None, description="Optional case identifier for graph persistence.")
 
 
+class CaptionImage(BaseModel):
+    """Lightweight image metadata surfaced to clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    path: str
+    modality: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _remove_none(self, handler):
+        data = handler(self)
+        return {k: v for k, v in data.items() if v is not None}
+
+
+class CaptionReport(BaseModel):
+    """Structured report metadata describing the generated caption."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    text: str
+    model: str
+    conf: float
+    ts: str
+
+
+class CaptionFinding(BaseModel):
+    """Normalised finding payload with deterministic identifiers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: str
+    conf: Optional[float] = None
+    location: Optional[str] = None
+    size_cm: Optional[float] = None
+
+    @model_serializer(mode="wrap")
+    def _remove_optional(self, handler):
+        data = handler(self)
+        return {k: v for k, v in data.items() if v is not None}
+
+
 class CaptionResponse(BaseModel):
     """Structured caption output consumed by downstream stages."""
 
-    image: ImageModel
-    report: ReportModel
-    findings: list[FindingModel]
+    model_config = ConfigDict(extra="forbid")
+
+    image: CaptionImage
+    report: CaptionReport
+    findings: list[CaptionFinding] = Field(default_factory=list)
     vlm_latency_ms: int
-
-    @property
-    def image_id(self) -> str:
-        return self.image.image_id
-
-    @property
-    def caption(self) -> str:
-        return self.report.text
-
-    @property
-    def model(self) -> str:
-        return self.report.model
 
 
 async def create_caption_response(
@@ -333,10 +392,35 @@ async def create_caption_response(
         ts=datetime.fromisoformat(report_payload["ts"]),
     )
 
+    response_findings: list[CaptionFinding] = []
+    for finding in findings:
+        finding_id = _generate_finding_id(image_id, finding)
+        location_value = finding.location.strip() if isinstance(finding.location, str) else finding.location
+        location_normalised = location_value or None
+        response_findings.append(
+            CaptionFinding(
+                id=finding_id,
+                type=finding.type,
+                conf=finding.conf,
+                location=location_normalised,
+                size_cm=finding.size_cm,
+            )
+        )
+
     response = CaptionResponse(
-        image=image_model,
-        report=report_model,
-        findings=findings,
+        image=CaptionImage(
+            id=image_model.image_id,
+            path=image_model.path,
+            modality=image_model.modality,
+        ),
+        report=CaptionReport(
+            id=report_model.id,
+            text=report_model.text,
+            model=report_model.model,
+            conf=report_model.conf,
+            ts=report_model.ts.isoformat(),
+        ),
+        findings=response_findings,
         vlm_latency_ms=int(vlm_result.get("latency_ms", vlm_latency_ms)),
     )
     entry_with_case = dict(entry) if entry else None

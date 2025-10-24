@@ -34,7 +34,12 @@ When a live API is running (e.g. via `make up`), omit `--mock` to exercise the f
 ## API smoke test (cURL)
 Make sure `make up` (or `docker compose up`) is running, then walk through the edge-centric flow.
 
-1. **Normalise a vision caption**
+1. **Check service health**
+   ```bash
+   curl http://localhost:8000/health
+   ```
+
+2. **Normalise a vision caption**
    ```bash
    curl -X POST http://localhost:8000/vision/caption \
      -H "Content-Type: application/json" \
@@ -45,9 +50,9 @@ Make sure `make up` (or `docker compose up`) is running, then walk through the e
    ```
    Returns canonical `image`/`report`/`findings[]` blocks.
 
-2. **Persist to the knowledge graph**
+3. **Persist to the knowledge graph**
    ```bash
-   curl -X POST http://localhost:8000/kg/upsert \
+   curl -X POST http://localhost:8000/graph/upsert \
      -H "Content-Type: application/json" \
      -d '{
            "case_id": "CASE_DEMO_001",
@@ -76,19 +81,20 @@ Make sure `make up` (or `docker compose up`) is running, then walk through the e
    ```
    Confirms `HAS_IMAGE`, `HAS_FINDING`, and `DESCRIBED_BY` edges are created.
 
-3. **Fetch graph-grounded context**
+4. **Fetch graph-grounded context**
    ```bash
-   curl "http://localhost:8000/kg/context?image_id=IMG_001"
+   curl "http://localhost:8000/graph/context?image_id=IMG_001"
    ```
    Provides structured `findings`, `reports`, and human-friendly `triples[]`.
 
-4. **Generate the final one-line impression**
+5. **Generate the final one-line impression**
    ```bash
    curl -X POST http://localhost:8000/llm/answer \
      -H "Content-Type: application/json" \
      -d '{"mode": "VGL", "image_id": "IMG_001", "style": "one_line"}'
    ```
    Swap `mode` between `V`, `VL`, and `VGL` to compare hallucination and consistency.
+   `VGL` responses now return an edge-first `context_pack` (edge summary, evidence paths, facts) used for LLM prompting.
 
 ## System Architecture
 ```

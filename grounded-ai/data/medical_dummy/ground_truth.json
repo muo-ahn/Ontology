@@ -1,6 +1,6 @@
 [
   {
-    "image_id": "IMG_001",
+    "id": "IMG_001",
     "file_name": "img_001.png",
     "case_id": "C_001",
     "modality": "XR",
@@ -8,7 +8,7 @@
     "vlm_confidence": 0.83,
     "findings": [
       {
-        "id": "F_IMG001_1",
+        "id": "F_IMG_001_1",
         "type": "nodule",
         "location": "RUL",
         "size_cm": 1.8,
@@ -20,7 +20,7 @@
     "blacklist": ["effusion", "atelectasis", "fracture"]
   },
   {
-    "image_id": "IMG_002",
+    "id": "IMG_002",
     "file_name": "img_002.png",
     "case_id": "C_002",
     "modality": "US",
@@ -28,7 +28,7 @@
     "vlm_confidence": 0.79,
     "findings": [
       {
-        "id": "F_IMG002_1",
+        "id": "F_IMG_002_1",
         "type": "fatty_liver",
         "location": "liver",
         "conf": 0.8
@@ -39,7 +39,7 @@
     "blacklist": ["mass", "gallstone", "ascites"]
   },
   {
-    "image_id": "IMG_003",
+    "id": "IMG_003",
     "file_name": "img_003.png",
     "case_id": "C_003",
     "modality": "ECG",
@@ -47,7 +47,7 @@
     "vlm_confidence": 0.76,
     "findings": [
       {
-        "id": "F_IMG003_1",
+        "id": "F_IMG_003_1",
         "type": "tachycardia",
         "location": "heart",
         "conf": 0.75

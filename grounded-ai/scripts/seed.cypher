@@ -7,7 +7,7 @@ CREATE CONSTRAINT IF NOT EXISTS FOR (o:Observation) REQUIRE o.observation_id IS 
 CREATE CONSTRAINT IF NOT EXISTS FOR (d:Diagnosis) REQUIRE d.diagnosis_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (pr:Procedure) REQUIRE pr.procedure_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (m:Medication) REQUIRE m.med_id IS UNIQUE;
-CREATE CONSTRAINT IF NOT EXISTS FOR (img:Image) REQUIRE img.image_id IS UNIQUE;
+CREATE CONSTRAINT IF NOT EXISTS FOR (img:Image) REQUIRE img.id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (ai:AIInference) REQUIRE ai.inference_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (ov:OntologyVersion) REQUIRE ov.version_id IS UNIQUE;
 
@@ -62,14 +62,17 @@ MERGE (enc)-[:HAS_OBSERVATION]->(obs);
 
 // Imaging
 WITH [
-  {image_id:'IMG001', encounter_id:'E0003', modality:'XR', captured_at:'2025-06-30T10:10:00', storage_uri:'/mnt/data/medical_dummy/images/img_001.png', caption_hint:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.'},
-  {image_id:'IMG002', encounter_id:'E0006', modality:'US', captured_at:'2025-07-06T09:45:00', storage_uri:'/mnt/data/medical_dummy/images/img_002.png', caption_hint:'Abdominal ultrasound – fatty liver pattern. No gallstones visualized.'},
-  {image_id:'IMG003', encounter_id:'E0005', modality:'ECG', captured_at:'2025-06-24T11:35:00', storage_uri:'/mnt/data/medical_dummy/images/img_003.png', caption_hint:'ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.'}
+  {id:'IMG_001', encounter_id:'E0003', modality:'XR', captured_at:'2025-06-30T10:10:00', storage_uri:'/mnt/data/medical_dummy/images/img_001.png', caption_hint:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.'},
+  {id:'IMG_002', encounter_id:'E0006', modality:'ECG', captured_at:'2025-07-06T09:45:00', storage_uri:'/mnt/data/medical_dummy/images/img_002.png', caption_hint:'Abdominal ultrasound – fatty liver pattern. No gallstones visualized.'},
+  {id:'IMG_003', encounter_id:'E0005', modality:'ECG', captured_at:'2025-06-24T11:35:00', storage_uri:'/mnt/data/medical_dummy/images/img_003.png', caption_hint:'ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.'}
 ] AS rows
 UNWIND rows AS r
 MATCH (enc:Encounter {encounter_id:r.encounter_id})
-MERGE (img:Image {image_id:r.image_id})
-SET img += {modality:r.modality, captured_at:r.captured_at, storage_uri:r.storage_uri, caption_hint:r.caption_hint}
+MERGE (img:Image {id:r.id})
+SET img.modality = r.modality,
+    img.captured_at = r.captured_at,
+    img.storage_uri = r.storage_uri,
+    img.caption_hint = r.caption_hint
 MERGE (enc)-[:HAS_IMAGE]->(img);
 
 // Procedures
@@ -107,11 +110,11 @@ MERGE (enc)-[:HAS_MEDICATION]->(m);
 
 // AI Inferences with provenance & versioning
 WITH [
-  {inference_id:'AI00001', image_id:'IMG001', encounter_id:'E0003', model:'llava-1.5-7b', model_version:'v1.0', task:'caption', output:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.', confidence:0.91, timestamp:'2025-10-10T12:00:00', source_type:'observation', source_reference:'O00004', role:'vision'}
+  {inference_id:'AI00001', id:'IMG_001', encounter_id:'E0003', model:'llava-1.5-7b', model_version:'v1.0', task:'caption', output:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.', confidence:0.91, timestamp:'2025-10-10T12:00:00', source_type:'observation', source_reference:'O00004', role:'vision'}
 ] AS rows
 UNWIND rows AS r
 MATCH (enc:Encounter {encounter_id:r.encounter_id})
-MATCH (img:Image {image_id:r.image_id})
+MATCH (img:Image {id:r.id})
 MATCH (ov:OntologyVersion {version_id:'1.1'})
 MERGE (ai:AIInference {inference_id:r.inference_id})
 SET ai += {

@@ -3,7 +3,7 @@ CREATE CONSTRAINT enc_id     IF NOT EXISTS FOR (n:Encounter)  REQUIRE n.encounte
 CREATE CONSTRAINT obs_id     IF NOT EXISTS FOR (n:Observation)REQUIRE n.observation_id IS UNIQUE;
 CREATE CONSTRAINT dx_id      IF NOT EXISTS FOR (n:Diagnosis)  REQUIRE n.diagnosis_id   IS UNIQUE;
 CREATE CONSTRAINT rx_id      IF NOT EXISTS FOR (n:Medication) REQUIRE n.med_id         IS UNIQUE;
-CREATE CONSTRAINT img_id     IF NOT EXISTS FOR (n:Image)      REQUIRE n.image_id       IS UNIQUE;
+CREATE CONSTRAINT img_id IF NOT EXISTS FOR (n:Image)      REQUIRE n.id       IS UNIQUE;
 CREATE CONSTRAINT ai_id      IF NOT EXISTS FOR (n:AIInference)REQUIRE n.inference_id   IS UNIQUE;
 
 LOAD CSV WITH HEADERS FROM 'file:///patients.csv' AS r
@@ -39,7 +39,7 @@ MATCH (e:Encounter {encounter_id: r.encounter_id})
 MERGE (e)-[:HAS_RX]->(m);
 
 LOAD CSV WITH HEADERS FROM 'file:///imaging.csv' AS r
-MERGE (i:Image {image_id: r.image_id})
+MERGE (i:Image {id: r.id})
 SET i.modality = r.modality, i.file_path = r.file_path, i.caption_hint = r.caption_hint
 WITH r, i
 MATCH (e:Encounter {encounter_id: r.encounter_id})
@@ -49,6 +49,6 @@ LOAD CSV WITH HEADERS FROM 'file:///ai_inference.csv' AS r
 MERGE (a:AIInference {inference_id: r.inference_id})
 SET a.model = r.model, a.task = r.task, a.output = r.output, a.confidence = toFloat(r.confidence), a.timestamp = r.timestamp
 WITH r, a
-MATCH (i:Image {image_id: r.image_id})
+MATCH (i:Image {id: r.id})
 MERGE (i)-[h:HAS_INFERENCE]->(a)
 ON CREATE SET h.confidence = toFloat(r.confidence), h.at = r.timestamp;

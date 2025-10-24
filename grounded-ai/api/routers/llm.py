@@ -1,172 +1,139 @@
-"""Pipeline router coordinating vLM → LLM workflows."""
+"""LLM summary endpoint supporting V / VL / VGL modes."""
 
 from __future__ import annotations
 
-import json
+import asyncio
 import time
 from enum import Enum
-from typing import Any, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
 
-from models.pipeline import KGUpsertRequest, ImageModel, ReportModel, FindingModel
-from services.dummy_dataset import default_summary
+from services.context_pack import GraphContextBuilder
+from services.graph_repo import GraphRepo
 from services.llm_runner import LLMRunner
-from services.vlm_runner import VLMRunner
-from services.neo4j_client import Neo4jClient
-from .kg import GraphContextResponse, fetch_image_context, get_neo4j, upsert_case_payload
-from .vision import CaptionRequest, create_caption_response, get_llm, get_vlm
 
 
-router = APIRouter()
-
-
-class PipelineMode(str, Enum):
+class AnswerMode(str, Enum):
     V = "V"
     VL = "VL"
     VGL = "VGL"
 
 
-CAPTION_TO_SUMMARY_PROMPT = (
-    "[Image Caption]\n{caption}\n\n[Task]\n"
-    "위 캡션만 근거로, 한국어 한 줄 소견을 작성하라.\n"
-    "추정/상상 금지. 최대 30자."
+class AnswerRequest(BaseModel):
+    mode: AnswerMode = Field(..., description="Summary mode: V, VL, or VGL")
+    image_id: str = Field(..., description="Target image identifier")
+    caption: Optional[str] = Field(
+        None,
+        description="Caption text provided in V/VL modes",
+    )
+    style: str = Field(
+        default="one_line",
+        description="Output style (currently only 'one_line' supported)",
+    )
+
+    @field_validator("style")
+    @classmethod
+    def _validate_style(cls, value: str) -> str:
+        if value != "one_line":
+            raise ValueError("style must be 'one_line'")
+        return value
+
+    @field_validator("caption")
+    @classmethod
+    def _strip_caption(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split()).strip()
+        return cleaned or None
+
+
+class AnswerResponse(BaseModel):
+    answer: str
+    latency_ms: int = Field(..., ge=0)
+
+
+router = APIRouter()
+
+_GRAPH_REPO = GraphRepo.from_env()
+_CONTEXT_BUILDER = GraphContextBuilder(_GRAPH_REPO)
+
+CAPTION_PROMPT = (
+    "[Caption]\n{caption}\n\n"
+    "[규칙]\n"
+    "- 위 캡션만 근거로 답하라.\n"
+    "- 새로운 사실/추정 금지. 불확실하면 '추가 검사 권고'.\n"
+    "- 출력은 한국어 한 줄(최대 30자).\n"
 )
 
-GRAPH_TO_SUMMARY_PROMPT = (
-    "[Graph Context]\n{context}\n\n[Task]\n"
-    "위 컨텍스트만 근거로 한국어 한 줄 소견을 작성하라.\n"
-    "새로운 사실 추가 금지. 불확실하면 \"추가 검사 권고\".\n"
-    "최대 30자."
+GRAPH_PROMPT = (
+    "[Graph Context]\n{context}\n\n"
+    "[규칙]\n"
+    "- 위 컨텍스트만 근거로 답하라.\n"
+    "- 새로운 사실/추정 금지. 불확실하면 '추가 검사 권고'.\n"
+    "- 출력은 한국어 한 줄(최대 30자). 근거를 괄호로 간단 표기.\n\n"
+    "[질문]\n"
+    "이 영상의 핵심 임상 소견을 요약하라."
 )
 
 
-class PipelineRequest(CaptionRequest):
-    mode: PipelineMode = Field(..., description="Pipeline variant to execute")
+def get_llm(request: Request) -> LLMRunner:
+    runner: LLMRunner | None = getattr(request.app.state, "llm", None)
+    if runner is None:
+        raise HTTPException(status_code=500, detail="LLM runner unavailable")
+    return runner
 
 
-class PipelineResponse(BaseModel):
-    mode: PipelineMode
-    image_id: str
-    case_id: Optional[str] = None
-    caption: str
-    findings: list[FindingModel]
-    output: str
-    vlm_model: str
-    llm_model: Optional[str] = None
-    graph_context: Optional[GraphContextResponse] = None
-    timings: dict[str, int]
+def _truncate_one_line(text: str, limit: int = 30) -> str:
+    cleaned = " ".join(text.split()).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit]
 
 
-async def _prepare_caption(
-    payload: PipelineRequest,
-    runner: VLMRunner,
-) -> tuple[CaptionResponse, Optional[dict[str, Any]], Optional[str], dict[str, Any]]:
-    caption_response, entry, resolved_path, raw_vlm = await create_caption_response(payload, runner)
-    case_id = (entry or {}).get("case_id") or payload.case_id
-    if entry is not None and case_id:
-        entry["case_id"] = case_id
-    elif case_id:
-        entry = {"case_id": case_id}
-    return caption_response, entry, resolved_path, raw_vlm
-
-
-def _select_summary(entry: Optional[dict[str, Any]], candidate: str) -> str:
-    if candidate and not candidate.startswith("[mock-llm]"):
-        return candidate.strip()
-    curated = default_summary(entry)
-    return curated or candidate
-
-
-@router.post("/answer", response_model=PipelineResponse)
-async def run_pipeline(
-    payload: PipelineRequest,
-    vlm: VLMRunner = Depends(get_vlm),
+@router.post("/answer", response_model=AnswerResponse)
+async def answer_endpoint(
+    payload: AnswerRequest,
     llm: LLMRunner = Depends(get_llm),
-    neo4j: Neo4jClient = Depends(get_neo4j),
-) -> PipelineResponse:
+) -> AnswerResponse:
+    if payload.mode in {AnswerMode.V, AnswerMode.VL} and not payload.caption:
+        raise HTTPException(status_code=400, detail="caption is required for V and VL modes")
+
     start = time.perf_counter()
-    caption_response, entry, resolved_path, raw_vlm = await _prepare_caption(payload, vlm)
 
-    image_path = (
-        caption_response.image.path
-        or resolved_path
-        or payload.file_path
-        or f"/tmp/{caption_response.image.image_id}.png"
+    if payload.mode == AnswerMode.V:
+        answer = _truncate_one_line(payload.caption or "")
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return AnswerResponse(answer=answer, latency_ms=latency_ms)
+
+    if payload.mode == AnswerMode.VL:
+        prompt = CAPTION_PROMPT.format(caption=payload.caption)
+        result = await llm.generate(prompt)
+        answer = _truncate_one_line(result.get("output", ""))
+        latency_ms = int(result.get("latency_ms", (time.perf_counter() - start) * 1000))
+        return AnswerResponse(answer=answer, latency_ms=latency_ms)
+
+    # VGL mode
+    try:
+        context_text = await asyncio.to_thread(
+            _CONTEXT_BUILDER.build_prompt_context,
+            payload.image_id,
+            2,
+            "triples",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - depends on external Neo4j state
+        raise HTTPException(status_code=500, detail=f"Graph context retrieval failed: {exc}") from exc
+
+    prompt = GRAPH_PROMPT.format(
+        context=context_text,
     )
-    case_id = (entry or {}).get("case_id")
-    if not case_id:
-        case_id = f"C_{caption_response.image.image_id}" if not payload.case_id else payload.case_id
-    timings: dict[str, int] = {"vlm_ms": int(caption_response.vlm_latency_ms)}
-    timings["vlm_model_ms"] = int((raw_vlm or {}).get("latency_ms", timings["vlm_ms"]))
+    result = await llm.generate(prompt)
+    answer = _truncate_one_line(result.get("output", ""))
+    latency_ms = int(result.get("latency_ms", (time.perf_counter() - start) * 1000))
+    return AnswerResponse(answer=answer, latency_ms=latency_ms)
 
-    mode = payload.mode
-    llm_output: Optional[str] = None
-    graph_context: Optional[GraphContextResponse] = None
-    llm_model_name: Optional[str] = None
 
-    if mode == PipelineMode.V:
-        output_text = caption_response.report.text
-    elif mode == PipelineMode.VL:
-        llm_prompt = CAPTION_TO_SUMMARY_PROMPT.format(caption=caption_response.report.text)
-        llm_start = time.perf_counter()
-        llm_result = await llm.generate(llm_prompt)
-        timings["llm_ms"] = int((time.perf_counter() - llm_start) * 1000)
-        llm_output = _select_summary(entry, llm_result.get("output", ""))
-        timings["llm_model_ms"] = int(llm_result.get("latency_ms", timings["llm_ms"]))
-        llm_model_name = llm_result.get("model", llm.model)
-        output_text = llm_output
-    elif mode == PipelineMode.VGL:
-        image_model = ImageModel(
-            image_id=caption_response.image.image_id,
-            path=image_path,
-            modality=caption_response.image.modality,
-        )
-        report = ReportModel(
-            id=caption_response.report.id,
-            text=caption_response.report.text,
-            model=caption_response.report.model,
-            conf=caption_response.report.conf,
-            ts=caption_response.report.ts,
-        )
-        kg_payload = KGUpsertRequest(
-            case_id=case_id,
-            image=image_model,
-            report=report,
-            findings=caption_response.findings,
-        )
-        graph_start = time.perf_counter()
-        await upsert_case_payload(kg_payload, neo4j)
-        graph_context = await fetch_image_context(caption_response.image.image_id, neo4j)
-        timings["graph_ms"] = int((time.perf_counter() - graph_start) * 1000)
-        context_json = json.dumps(graph_context.model_dump(mode="json"), ensure_ascii=False, indent=2)
-        llm_prompt = GRAPH_TO_SUMMARY_PROMPT.format(context=context_json)
-        llm_start = time.perf_counter()
-        llm_result = await llm.generate(llm_prompt)
-        timings["llm_ms"] = int((time.perf_counter() - llm_start) * 1000)
-        llm_output = _select_summary(entry, llm_result.get("output", ""))
-        timings["llm_model_ms"] = int(llm_result.get("latency_ms", timings["llm_ms"]))
-        llm_model_name = llm_result.get("model", llm.model)
-        output_text = llm_output
-    else:  # pragma: no cover - Enum guards
-        raise HTTPException(status_code=400, detail="Unsupported pipeline mode")
-
-    total_ms = int((time.perf_counter() - start) * 1000)
-    timings.setdefault("llm_ms", 0)
-    timings.setdefault("graph_ms", 0)
-    timings.setdefault("llm_model_ms", 0)
-    timings["total_ms"] = total_ms
-
-    return PipelineResponse(
-        mode=mode,
-        image_id=caption_response.image.image_id,
-        case_id=case_id,
-        caption=caption_response.report.text,
-        findings=caption_response.findings,
-        output=output_text,
-        vlm_model=caption_response.report.model,
-        llm_model=llm_model_name,
-        graph_context=graph_context,
-        timings=timings,
-    )
+__all__ = ["router"]

@@ -116,7 +116,7 @@ query = st.text_area("Cypher Query", value=default_query, height=150)
 if st.button("Run Cypher"):
     try:
         response = requests.post(
-            f"{API_URL}/kg/cypher",
+            f"{API_URL}/graph/cypher",
             json={"query": query, "params": {}},
             timeout=10,
         )
