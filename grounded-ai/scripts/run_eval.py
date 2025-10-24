@@ -35,11 +35,11 @@ def _load_ground_truth() -> Dict[str, Dict]:
     raw = json.loads(GROUND_TRUTH_FILE.read_text(encoding="utf-8"))
     records: Dict[str, Dict] = {}
     for item in raw:
-        image_id = (item.get("image_id") or item.get("id") or "").upper()
-        if not image_id:
+        id = (item.get("id") or item.get("id") or "").upper()
+        if not id:
             continue
-        item["image_id"] = image_id
-        records[image_id] = item
+        item["id"] = id
+        records[id] = item
     return records
 
 
@@ -86,13 +86,13 @@ def _call_caption(
     client: httpx.Client,
     base_url: str,
     image_path: Path,
-    image_id: str,
+    id: str,
     case_id: str | None,
     timeout: float,
 ) -> Dict:
     payload = {
         "file_path": str(image_path.resolve()),
-        "image_id": image_id,
+        "id": id,
         "case_id": case_id,
     }
     start = time.perf_counter()
@@ -126,8 +126,8 @@ def _call_graph_upsert(client: httpx.Client, base_url: str, payload: Dict, timeo
     response.raise_for_status()
 
 
-def _call_graph_context(client: httpx.Client, base_url: str, image_id: str, timeout: float) -> str:
-    params = {"image_id": image_id, "k": 2, "mode": "triples"}
+def _call_graph_context(client: httpx.Client, base_url: str, id: str, timeout: float) -> str:
+    params = {"id": id, "k": 2, "mode": "triples"}
     response = client.get(f"{base_url}/graph/context", params=params, timeout=timeout)
     response.raise_for_status()
     data = response.json()
@@ -155,7 +155,7 @@ def _evaluate_mode(outputs: List[str], latencies: List[float], entry: Dict | Non
 
 def _prepare_upsert_payload(entry: Dict | None, caption_data: Dict, image_path: Path, case_id: str) -> Dict:
     image_block = dict(caption_data.get("image", {}))
-    image_block["image_id"] = image_block.get("image_id") or image_block.get("id")
+    image_block["id"] = image_block.get("id") or image_block.get("id")
     image_block["path"] = str(image_path.resolve())
     image_block.setdefault("modality", (entry or {}).get("modality"))
 
@@ -173,10 +173,10 @@ def _prepare_upsert_payload(entry: Dict | None, caption_data: Dict, image_path: 
     }
 
 
-def _case_id_for(entry: Dict | None, image_id: str) -> str:
+def _case_id_for(entry: Dict | None, id: str) -> str:
     if entry and entry.get("case_id"):
         return entry["case_id"]
-    return f"C_{image_id}"
+    return f"C_{id}"
 
 
 def evaluate_image(
@@ -188,10 +188,10 @@ def evaluate_image(
     repeats: int,
     timeout: float,
 ) -> List[Dict[str, float]]:
-    image_id = (entry or {}).get("image_id") or image_path.stem.upper()
+    id = (entry or {}).get("id") or image_path.stem.upper()
 
-    case_id = _case_id_for(entry, image_id)
-    caption_data = _call_caption(client, base_url, image_path, image_id, case_id, timeout)
+    case_id = _case_id_for(entry, id)
+    caption_data = _call_caption(client, base_url, image_path, id, case_id, timeout)
     caption_text = _normalise_text(caption_data["report"]["text"])
 
     rows: List[Dict[str, float]] = []
@@ -199,7 +199,7 @@ def evaluate_image(
     v_metrics = _evaluate_mode([caption_text], [caption_data["_latency_ms"]], entry, force_consistency=1.0)
     rows.append(
         {
-            "image_id": image_id,
+            "id": id,
             "mode": "V",
             "factuality": v_metrics["factuality"],
             "hallucination": v_metrics["hallucination"],
@@ -211,14 +211,14 @@ def evaluate_image(
     vl_outputs: List[str] = []
     vl_latencies: List[float] = []
     for _ in range(repeats):
-        llm_payload = {"mode": "VL", "image_id": image_id, "caption": caption_text, "style": "one_line"}
+        llm_payload = {"mode": "VL", "id": id, "caption": caption_text, "style": "one_line"}
         llm_response = _call_llm_answer(client, base_url, llm_payload, timeout)
         vl_outputs.append(llm_response.get("answer", ""))
         vl_latencies.append(float(llm_response.get("latency_ms", 0)))
     vl_metrics = _evaluate_mode(vl_outputs, vl_latencies, entry)
     rows.append(
         {
-            "image_id": image_id,
+            "id": id,
             "mode": "VL",
             "factuality": vl_metrics["factuality"],
             "hallucination": vl_metrics["hallucination"],
@@ -233,11 +233,11 @@ def evaluate_image(
     for _ in range(repeats):
         run_start = time.perf_counter()
         _call_graph_upsert(client, base_url, upsert_payload, timeout)
-        _call_graph_context(client, base_url, image_id, timeout)
+        _call_graph_context(client, base_url, id, timeout)
         llm_response = _call_llm_answer(
             client,
             base_url,
-            {"mode": "VGL", "image_id": image_id, "style": "one_line"},
+            {"mode": "VGL", "id": id, "style": "one_line"},
             timeout,
         )
         vgl_outputs.append(llm_response.get("answer", ""))
@@ -246,7 +246,7 @@ def evaluate_image(
     vgl_metrics = _evaluate_mode(vgl_outputs, vgl_latencies, entry)
     rows.append(
         {
-            "image_id": image_id,
+            "id": id,
             "mode": "VGL",
             "factuality": vgl_metrics["factuality"],
             "hallucination": vgl_metrics["hallucination"],
@@ -325,8 +325,8 @@ def main() -> None:
     rows: List[Dict[str, float]] = []
     with httpx.Client(timeout=args.timeout) as client:
         for image_path in images:
-            image_id = image_path.stem.upper()
-            entry = ground_truth.get(image_id)
+            id = image_path.stem.upper()
+            entry = ground_truth.get(id)
             try:
                 image_rows = evaluate_image(
                     client,
@@ -347,7 +347,7 @@ def main() -> None:
     with results_csv.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
             fh,
-            fieldnames=["image_id", "mode", "factuality", "hallucination", "consistency", "latency_ms"],
+            fieldnames=["id", "mode", "factuality", "hallucination", "consistency", "latency_ms"],
         )
         writer.writeheader()
         for row in rows:

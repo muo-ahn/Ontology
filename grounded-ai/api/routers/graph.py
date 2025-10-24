@@ -25,12 +25,12 @@ async def upsert_case(payload: KGUpsertRequest) -> dict[str, bool]:
 
 @router.get("/context")
 async def get_context(
-    image_id: str = Query(..., description="Target image identifier"),
+    id: str = Query(..., description="Target image identifier"),
     k: int = Query(2, ge=1, le=10, description="Top-k evidence paths to include"),
     mode: str = Query("triples", pattern="^(triples|json)$", description="triples → formatted summary, json → raw facts JSON"),
 ) -> dict[str, str]:
     try:
-        context = _CONTEXT_BUILDER.build_prompt_context(image_id=image_id, k=k, mode=mode)
+        context = _CONTEXT_BUILDER.build_prompt_context(id=id, k=k, mode=mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - depends on external Neo4j state

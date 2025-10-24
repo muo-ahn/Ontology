@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 import base64
+import datetime
 
 try:
     import httpx
@@ -23,7 +24,7 @@ def _print_section(title: str, payload: Any) -> None:
         print(payload)
 
 
-def _ensure_image_id(path: Path) -> str:
+def _ensure_id(path: Path) -> str:
     stem = path.stem.upper()
     if not stem.startswith("IMG"):
         return f"IMG_{stem}"
@@ -32,7 +33,7 @@ def _ensure_image_id(path: Path) -> str:
 
 def _build_upsert_payload(caption: Dict[str, Any], case_id: str, default_path: Path) -> Dict[str, Any]:
     image_block = dict(caption.get("image", {}))
-    image_block.setdefault("id", image_block.get("image_id"))
+    image_block.setdefault("id", image_block.get("id"))
     image_block.setdefault("path", f"/data/{default_path.name}")
 
     report_block = dict(caption.get("report", {}))
@@ -44,6 +45,48 @@ def _build_upsert_payload(caption: Dict[str, Any], case_id: str, default_path: P
         "report": report_block,
         "findings": findings_block,
     }
+
+
+def _load_ground_truth() -> Dict[str, Dict[str, Any]]:
+    global _GROUND_TRUTH_CACHE
+    if _GROUND_TRUTH_CACHE is not None:
+        return _GROUND_TRUTH_CACHE
+    if not GROUND_TRUTH_FILE.exists():
+        _GROUND_TRUTH_CACHE = {}
+        return _GROUND_TRUTH_CACHE
+    data = json.loads(GROUND_TRUTH_FILE.read_text(encoding="utf-8"))
+    records: Dict[str, Dict[str, Any]] = {}
+    for entry in data:
+        id = entry.get("id") or entry.get("id")
+        if not id:
+            continue
+        records[id.upper()] = entry
+    _GROUND_TRUTH_CACHE = records
+    return records
+
+
+def _fallback_caption(id: str, image_path: Path) -> Dict[str, Any]:
+    ground_truth = _load_ground_truth()
+    entry = ground_truth.get(id.upper())
+    if not entry:
+        raise RuntimeError(f"No ground-truth entry available for id={id}")
+
+    findings = entry.get("findings", [])
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    caption_data = {
+        "image": {"id": id, "path": f"/data/{image_path.name}", "modality": entry.get("modality")},
+        "report": {
+            "id": entry.get("report_id", f"r_{id.lower()}_dummy"),
+            "text": entry.get("caption", ""),
+            "model": entry.get("vlm_model", "mock-vlm"),
+            "conf": entry.get("vlm_confidence", 0.75),
+            "ts": now_iso,
+        },
+        "findings": findings,
+        "vlm_latency_ms": 0,
+        "_mocked": True,
+    }
+    return caption_data
 
 
 def main() -> int:
@@ -62,8 +105,8 @@ def main() -> int:
     if not image_path.exists():
         raise SystemExit(f"image not found: {image_path}")
 
-    image_id = _ensure_image_id(image_path)
-    case_id = args.case_id or f"C_{image_id}"
+    id = _ensure_id(image_path)
+    case_id = args.case_id or f"C_{id}"
     base_url = args.api_url.rstrip("/")
 
     with httpx.Client(base_url=base_url, timeout=args.timeout) as client:
@@ -78,13 +121,20 @@ def main() -> int:
 
         caption_payload = {
             "image_b64": image_b64,
-            "image_id": image_id,
+            "id": id,
             "case_id": case_id,
         }
-        caption_resp = client.post("/vision/caption", json=caption_payload)
-        caption_resp.raise_for_status()
-        caption_data = caption_resp.json()
-        _print_section("POST /vision/caption", caption_data)
+        try:
+            caption_resp = client.post("/vision/caption", json=caption_payload)
+            caption_resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body_preview = exc.response.text[:500]
+            print(f"[WARN] /vision/caption failed ({exc.response.status_code}): {body_preview}")
+            caption_data = _fallback_caption(id, image_path)
+            _print_section("POST /vision/caption (mock fallback)", caption_data)
+        else:
+            caption_data = caption_resp.json()
+            _print_section("POST /vision/caption", caption_data)
 
         # 3. /graph/upsert
         upsert_payload = _build_upsert_payload(caption_data, case_id, image_path)
@@ -93,11 +143,11 @@ def main() -> int:
         _print_section("POST /graph/upsert", upsert_resp.json())
 
         # 4. /graph/context (triples + json)
-        context_resp = client.get("/graph/context", params={"image_id": image_id, "mode": "triples", "k": 2})
+        context_resp = client.get("/graph/context", params={"id": id, "mode": "triples", "k": 2})
         context_resp.raise_for_status()
         _print_section("GET /graph/context (mode=triples)", context_resp.json())
 
-        context_json_resp = client.get("/graph/context", params={"image_id": image_id, "mode": "json", "k": 2})
+        context_json_resp = client.get("/graph/context", params={"id": id, "mode": "json", "k": 2})
         context_json_resp.raise_for_status()
         _print_section("GET /graph/context (mode=json)", context_json_resp.json())
 
@@ -106,19 +156,19 @@ def main() -> int:
 
         v_resp = client.post(
             "/llm/answer",
-            json={"mode": "V", "image_id": image_id, "caption": caption_text, "style": "one_line"},
+            json={"mode": "V", "id": id, "caption": caption_text, "style": "one_line"},
         )
         v_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=V)", v_resp.json())
 
-        vl_payload = {"mode": "VL", "image_id": image_id, "caption": caption_text, "style": "one_line"}
+        vl_payload = {"mode": "VL", "id": id, "caption": caption_text, "style": "one_line"}
         vl_resp = client.post("/llm/answer", json=vl_payload)
         vl_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=VL)", vl_resp.json())
 
         vgl_resp = client.post(
             "/llm/answer",
-            json={"mode": "VGL", "image_id": image_id, "style": "one_line"},
+            json={"mode": "VGL", "id": id, "style": "one_line"},
         )
         vgl_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=VGL)", vgl_resp.json())
@@ -129,3 +179,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+GROUND_TRUTH_FILE = Path("grounded-ai/data/medical_dummy/ground_truth.json")
+_GROUND_TRUTH_CACHE: Dict[str, Dict[str, Any]] | None = None

@@ -27,14 +27,14 @@ FOREACH (f IN $findings |
 """
 
 EDGE_SUMMARY_QUERY = """
-MATCH (i:Image {id:$image_id})-[rel]->(x)
+MATCH (i:Image {id:$id})-[rel]->(x)
 WITH type(rel) AS reltype, count(*) AS cnt, round(avg(coalesce(rel.conf,0.5))*100)/100 AS avg_conf
 RETURN reltype, cnt, avg_conf
 ORDER BY cnt DESC, avg_conf DESC
 """
 
 TOPK_PATHS_QUERY = """
-MATCH (i:Image {id:$image_id})-[:HAS_FINDING]->(f:Finding)
+MATCH (i:Image {id:$id})-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[r1:LOCATED_IN]->(a:Anatomy)
 OPTIONAL MATCH (i)-[r2:DESCRIBED_BY]->(rep:Report)
 WITH i,f,a, r1,rep, r2,
@@ -49,9 +49,9 @@ RETURN hits
 """
 
 FACTS_QUERY = """
-MATCH (i:Image {id:$image_id})-[:HAS_FINDING]->(f:Finding)
+MATCH (i:Image {id:$id})-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-RETURN i.id AS image_id,
+RETURN i.id AS id,
        collect({type:f.type, location:a.name, size_cm:f.size_cm, conf:f.conf}) AS findings
 """
 
@@ -98,10 +98,10 @@ class GraphRepo:
 
         image = data.get("image") or {}
         if "id" not in image:
-            if "image_id" in image:
-                image["id"] = image["image_id"]
+            if "id" in image:
+                image["id"] = image["id"]
             else:
-                raise ValueError("image.id or image.image_id is required")
+                raise ValueError("image.id or image.id is required")
         data["image"] = image
 
         report = data.get("report") or {}
@@ -119,15 +119,15 @@ class GraphRepo:
         parameters = self._prepare_upsert_parameters(payload)
         self._run_write(UPSERT_CASE_QUERY, parameters)
 
-    def query_edge_summary(self, image_id: str) -> List[Dict[str, Any]]:
-        return self._run_read(EDGE_SUMMARY_QUERY, {"image_id": image_id})
+    def query_edge_summary(self, id: str) -> List[Dict[str, Any]]:
+        return self._run_read(EDGE_SUMMARY_QUERY, {"id": id})
 
-    def query_topk_paths(self, image_id: str, k: int = 2) -> List[Dict[str, Any]]:
-        return self._run_read(TOPK_PATHS_QUERY, {"image_id": image_id, "k": k})
+    def query_topk_paths(self, id: str, k: int = 2) -> List[Dict[str, Any]]:
+        return self._run_read(TOPK_PATHS_QUERY, {"id": id, "k": k})
 
-    def query_facts(self, image_id: str) -> Dict[str, Any]:
-        records = self._run_read(FACTS_QUERY, {"image_id": image_id})
-        return records[0] if records else {"image_id": image_id, "findings": []}
+    def query_facts(self, id: str) -> Dict[str, Any]:
+        records = self._run_read(FACTS_QUERY, {"id": id})
+        return records[0] if records else {"id": id, "findings": []}
 
 
 __all__ = ["GraphRepo"]

@@ -29,7 +29,7 @@ from services.dummy_dataset import (
     decode_image_payload,
     default_caption,
     ensure_case_id,
-    ensure_image_id,
+    ensure_id,
     lookup_entry,
 )
 
@@ -55,10 +55,10 @@ def _size_component(size_cm: Optional[float]) -> str:
     return f"{round(float(size_cm), 1):.1f}"
 
 
-def _generate_finding_id(image_id: str, finding: FindingModel) -> str:
+def _generate_finding_id(id: str, finding: FindingModel) -> str:
     base = "|".join(
         [
-            image_id.strip().lower(),
+            id.strip().lower(),
             (finding.type or "").strip().lower(),
             _normalise_component(finding.location),
             _size_component(finding.size_cm),
@@ -118,7 +118,7 @@ def get_vector_store(request: Request) -> QdrantVectorStore:
 
 
 class VisionInferenceResponse(BaseModel):
-    image_id: str
+    id: str
     vlm_output: str = Field(..., description="Caption or VQA output from the vision model")
     vlm_model: str
     vlm_latency_ms: int
@@ -136,7 +136,7 @@ class VisionInferenceResponse(BaseModel):
 async def _persist_inference(
     repo: GraphRepository,
     *,
-    image_id: str,
+    id: str,
     encounter_id: Optional[str],
     inference_id: str,
     model: str,
@@ -179,7 +179,7 @@ async def _persist_inference(
 
     return await asyncio.to_thread(
         repo.persist_inference,
-        image_id=image_id,
+        id=id,
         inference_id=inference_id,
         properties=properties,
         edge_properties=edge_properties,
@@ -194,7 +194,7 @@ async def _persist_inference(
 async def _ensure_image(
     repo: GraphRepository,
     *,
-    image_id: str,
+    id: str,
     file_path: str,
     modality: Optional[str],
     patient_id: Optional[str],
@@ -203,7 +203,7 @@ async def _ensure_image(
 ) -> None:
     await asyncio.to_thread(
         repo.ensure_image,
-        image_id=image_id,
+        id=id,
         file_path=file_path,
         modality=modality,
         patient_id=patient_id,
@@ -218,7 +218,7 @@ async def _store_embeddings(
     *,
     image_bytes: bytes,
     image_path: str,
-    image_id: str,
+    id: str,
     vlm_output: Optional[str],
     llm_output: Optional[str],
     vlm_inference_id: Optional[str],
@@ -237,7 +237,7 @@ async def _store_embeddings(
         filename=Path(image_path).name,
         vector=image_vector,
         mime_type="image/png",
-        metadata={"image_id": image_id, "source": "vision"},
+        metadata={"id": id, "source": "vision"},
     )
 
     if vlm_output:
@@ -247,7 +247,7 @@ async def _store_embeddings(
             text=vlm_output,
             vector=vlm_vector,
             metadata={
-                "image_id": image_id,
+                "id": id,
                 "inference_id": vlm_inference_id,
                 "source": "vlm",
             },
@@ -260,7 +260,7 @@ async def _store_embeddings(
             text=llm_output,
             vector=llm_vector,
             metadata={
-                "image_id": image_id,
+                "id": id,
                 "inference_id": llm_inference_id,
                 "source": "llm",
             },
@@ -280,7 +280,7 @@ class CaptionRequest(BaseModel):
         default=None,
         description="Filesystem path to an image accessible by the API container.",
     )
-    image_id: Optional[str] = Field(default=None, description="Optional existing image identifier.")
+    id: Optional[str] = Field(default=None, description="Optional existing image identifier.")
     case_id: Optional[str] = Field(default=None, description="Optional case identifier for graph persistence.")
 
 
@@ -352,8 +352,8 @@ async def create_caption_response(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    entry = lookup_entry(image_id=payload.image_id, file_path=resolved_path or payload.file_path)
-    image_id = ensure_image_id(entry=entry, explicit_id=payload.image_id, image_bytes=image_bytes)
+    entry = lookup_entry(id=payload.id, file_path=resolved_path or payload.file_path)
+    id = ensure_id(entry=entry, explicit_id=payload.id, image_bytes=image_bytes)
 
     vlm_start = time.perf_counter()
     try:
@@ -369,17 +369,17 @@ async def create_caption_response(
     vlm_result.setdefault("latency_ms", vlm_latency_ms)
 
     caption_text = default_caption(entry, vlm_result.get("output", ""))
-    findings = build_findings(image_id, caption_text, entry)
+    findings = build_findings(id, caption_text, entry)
 
-    image_path = resolved_path or payload.file_path or f"/data/{image_id}.png"
+    image_path = resolved_path or payload.file_path or f"/data/{id}.png"
     image_model = ImageModel(
-        image_id=image_id,
+        id=id,
         path=image_path,
         modality=(entry or {}).get("modality"),
     )
 
     report_payload = build_report(
-        image_id=image_id,
+        id=id,
         caption=caption_text,
         model=vlm_result.get("model", runner.model),
         entry=entry,
@@ -394,7 +394,7 @@ async def create_caption_response(
 
     response_findings: list[CaptionFinding] = []
     for finding in findings:
-        finding_id = _generate_finding_id(image_id, finding)
+        finding_id = _generate_finding_id(id, finding)
         location_value = finding.location.strip() if isinstance(finding.location, str) else finding.location
         location_normalised = location_value or None
         response_findings.append(
@@ -409,7 +409,7 @@ async def create_caption_response(
 
     response = CaptionResponse(
         image=CaptionImage(
-            id=image_model.image_id,
+            id=image_model.id,
             path=image_model.path,
             modality=image_model.modality,
         ),
@@ -451,7 +451,7 @@ async def create_vision_task(
     task: VLMRunner.Task = Form(VLMRunner.Task.CAPTION),
     temperature: float = Form(0.2),
     llm_temperature: float = Form(0.2),
-    image_id: Optional[str] = Form(None),
+    id: Optional[str] = Form(None),
     modality: Optional[str] = Form(None),
     patient_id: Optional[str] = Form(None),
     encounter_id: Optional[str] = Form(None),
@@ -465,13 +465,13 @@ async def create_vision_task(
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
 
     image_hash = hashlib.sha256(contents).hexdigest()
-    derived_image_id = image_id or f"img-{image_hash[:16]}"
+    derived_id = id or f"img-{image_hash[:16]}"
     task_id = idempotency_key or str(uuid4())
 
     upload_dir = Path(os.getenv("IMAGE_UPLOAD_DIR", "/data/uploads"))
     upload_dir.mkdir(parents=True, exist_ok=True)
     extension = Path(image.filename or "upload.png").suffix or ".png"
-    stored_path = upload_dir / f"{derived_image_id}{extension}"
+    stored_path = upload_dir / f"{derived_id}{extension}"
     try:
         stored_path.write_bytes(contents)
     except Exception as exc:  # pragma: no cover
@@ -480,7 +480,7 @@ async def create_vision_task(
 
     payload = {
         "task_id": task_id,
-        "image_id": derived_image_id,
+        "id": derived_id,
         "image_path": str(stored_path),
         "prompt": prompt,
         "llm_prompt": llm_prompt,
@@ -497,7 +497,7 @@ async def create_vision_task(
         task_id,
         "queued",
         {
-            "image_id": derived_image_id,
+            "id": derived_id,
             "persist": persist,
             "task": task.value,
         },
@@ -512,7 +512,7 @@ async def create_vision_task(
 
     return {
         "task_id": task_id,
-        "image_id": derived_image_id,
+        "id": derived_id,
         "status_endpoint": f"/vision/tasks/{task_id}/events",
     }
 
@@ -544,7 +544,7 @@ async def run_inference(
     task: VLMRunner.Task = Form(VLMRunner.Task.CAPTION),
     temperature: float = Form(0.2),
     llm_temperature: float = Form(0.2),
-    image_id: Optional[str] = Form(None, description="Existing or new image identifier."),
+    id: Optional[str] = Form(None, description="Existing or new image identifier."),
     modality: Optional[str] = Form(
         None,
         description="Imaging modality (XR, CT, MRI, US, etc.).",
@@ -566,9 +566,9 @@ async def run_inference(
     vector_store: QdrantVectorStore = Depends(get_vector_store),
 ) -> VisionInferenceResponse:
     logger.info(
-        "Vision inference requested image_id=%s persist=%s task=%s "
+        "Vision inference requested id=%s persist=%s task=%s "
         "prompt_preview=%s llm_prompt_preview=%s",
-        image_id,
+        id,
         persist,
         task.value,
         (prompt or "")[:120],
@@ -580,11 +580,11 @@ async def run_inference(
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
 
     image_hash = hashlib.sha256(contents).hexdigest()
-    derived_image_id = image_id or f"img-{image_hash[:16]}"
+    derived_id = id or f"img-{image_hash[:16]}"
     upload_dir = Path(os.getenv("IMAGE_UPLOAD_DIR", "/data/uploads"))
     upload_dir.mkdir(parents=True, exist_ok=True)
     extension = Path(image.filename or "upload.png").suffix or ".png"
-    stored_path = upload_dir / f"{derived_image_id}{extension}"
+    stored_path = upload_dir / f"{derived_id}{extension}"
     try:
         stored_path.write_bytes(contents)
     except Exception as exc:  # pragma: no cover - filesystem errors
@@ -627,7 +627,7 @@ async def run_inference(
     if persist:
         await _ensure_image(
             graph_repo,
-            image_id=derived_image_id,
+            id=derived_id,
             file_path=str(stored_path),
             modality=modality,
             patient_id=patient_id,
@@ -635,17 +635,17 @@ async def run_inference(
             caption_hint=vlm_output or llm_result.get("output"),
         )
 
-        base_payload = f"{derived_image_id}:{task.value}:{prompt}:{image_hash}"
+        base_payload = f"{derived_id}:{task.value}:{prompt}:{image_hash}"
         vlm_key = idempotency_key or hashlib.sha256(base_payload.encode()).hexdigest()
         vlm_inference_id = f"vlm-{vlm_key[:18]}"
 
-        llm_payload = f"{derived_image_id}:llm:{llm_prompt}:{vlm_output}"
+        llm_payload = f"{derived_id}:llm:{llm_prompt}:{vlm_output}"
         llm_key = hashlib.sha256(llm_payload.encode()).hexdigest()
         llm_inference_id = f"llm-{llm_key[:18]}"
 
         await _persist_inference(
             graph_repo,
-            image_id=derived_image_id,
+            id=derived_id,
             encounter_id=encounter_id,
             inference_id=vlm_inference_id,
             model=vlm_result.get("model", ""),
@@ -660,7 +660,7 @@ async def run_inference(
         )
         await _persist_inference(
             graph_repo,
-            image_id=derived_image_id,
+            id=derived_id,
             encounter_id=encounter_id,
             inference_id=llm_inference_id,
             model=llm_result.get("model", ""),
@@ -680,7 +680,7 @@ async def run_inference(
                 vector_store,
                 image_bytes=contents,
                 image_path=str(stored_path),
-                image_id=derived_image_id,
+                id=derived_id,
                 vlm_output=vlm_output,
                 llm_output=llm_result.get("output"),
                 vlm_inference_id=vlm_inference_id,
@@ -693,7 +693,7 @@ async def run_inference(
             if image_vector_id:
                 await asyncio.to_thread(
                     graph_repo.set_image_embedding,
-                    derived_image_id,
+                    derived_id,
                     image_vector_id,
                 )
             if vlm_vector_id and vlm_inference_id:
@@ -710,23 +710,23 @@ async def run_inference(
                 )
         except Exception as exc:  # pragma: no cover - logging path
             logger.warning(
-                "Embedding persistence failed for image_id=%s: %s",
-                derived_image_id,
+                "Embedding persistence failed for id=%s: %s",
+                derived_id,
                 exc,
             )
 
         persisted = True
         logger.info(
-            "Persisted inference nodes image_id=%s vlm_id=%s llm_id=%s",
-            derived_image_id,
+            "Persisted inference nodes id=%s vlm_id=%s llm_id=%s",
+            derived_id,
             vlm_inference_id,
             llm_inference_id,
         )
     elif persist:
-        logger.info("Persistence requested but no image_id provided; skipping write.")
+        logger.info("Persistence requested but no id provided; skipping write.")
 
     return VisionInferenceResponse(
-        image_id=derived_image_id,
+        id=derived_id,
         vlm_output=vlm_output,
         vlm_model=vlm_result.get("model", ""),
         vlm_latency_ms=vlm_result.get("latency_ms", 0),

@@ -43,24 +43,24 @@ def load_ground_truth() -> dict[str, dict[str, Any]]:
     if not _GROUND_TRUTH_FILE.exists():
         return {}
     data = json.loads(_GROUND_TRUTH_FILE.read_text(encoding="utf-8"))
-    return {entry["image_id"].upper(): entry for entry in data}
+    return {entry["id"].upper(): entry for entry in data}
 
 
-def normalise_image_id(image_id: str) -> str:
+def normalise_id(id: str) -> str:
     """Normalise image identifiers to the `IMG_###` form used by the dataset."""
 
-    cleaned = image_id.strip().replace("-", "_").upper()
+    cleaned = id.strip().replace("-", "_").upper()
     if cleaned.startswith("IMG") and "_" not in cleaned:
         cleaned = cleaned[:3] + "_" + cleaned[3:]
     return cleaned
 
 
-def lookup_entry(*, image_id: Optional[str] = None, file_path: Optional[str] = None) -> Optional[dict[str, Any]]:
+def lookup_entry(*, id: Optional[str] = None, file_path: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Return ground-truth metadata when we can match the image id or file name."""
 
     records = load_ground_truth()
-    if image_id:
-        candidate = records.get(normalise_image_id(image_id))
+    if id:
+        candidate = records.get(normalise_id(id))
         if candidate:
             return candidate
     if file_path:
@@ -84,7 +84,7 @@ def decode_image_payload(image_b64: Optional[str], file_path: Optional[str]) -> 
     raise ValueError("Either image_b64 or file_path must be provided")
 
 
-def ensure_image_id(
+def ensure_id(
     *,
     entry: Optional[dict[str, Any]],
     explicit_id: Optional[str],
@@ -93,9 +93,9 @@ def ensure_image_id(
     """Derive a stable image identifier."""
 
     if explicit_id:
-        return normalise_image_id(explicit_id)
+        return normalise_id(explicit_id)
     if entry:
-        return normalise_image_id(entry["image_id"])
+        return normalise_id(entry["id"])
     digest = hashlib.sha1(image_bytes).hexdigest()[:8]
     return f"IMG_{digest.upper()}"
 
@@ -109,7 +109,7 @@ def default_caption(entry: Optional[dict[str, Any]], vlm_output: str) -> str:
     return text or (entry["caption"] if entry else "")
 
 
-def build_findings(image_id: str, caption: str, entry: Optional[dict[str, Any]]) -> list[FindingModel]:
+def build_findings(id: str, caption: str, entry: Optional[dict[str, Any]]) -> list[FindingModel]:
     """Return structured findings using curated metadata or lightweight heuristics."""
 
     if entry and entry.get("findings"):
@@ -122,18 +122,18 @@ def build_findings(image_id: str, caption: str, entry: Optional[dict[str, Any]])
         size_cm = float(size_match.group(2)) if size_match else None
         findings.append(
             FindingModel(
-                id=f"F_{image_id}_N", type="nodule", location="RUL" if "upper" in lower else None, size_cm=size_cm, conf=0.6
+                id=f"F_{id}_N", type="nodule", location="RUL" if "upper" in lower else None, size_cm=size_cm, conf=0.6
             )
         )
     if "fatty" in lower and "liver" in lower:
-        findings.append(FindingModel(id=f"F_{image_id}_L", type="fatty_liver", location="liver", conf=0.6))
+        findings.append(FindingModel(id=f"F_{id}_L", type="fatty_liver", location="liver", conf=0.6))
     if "tachycardia" in lower:
-        findings.append(FindingModel(id=f"F_{image_id}_T", type="tachycardia", location="heart", conf=0.55))
+        findings.append(FindingModel(id=f"F_{id}_T", type="tachycardia", location="heart", conf=0.55))
     if not findings:
         fallback_conf = default_confidence(entry)
         findings.append(
             FindingModel(
-                id=f"F_{image_id}_OBS",
+                id=f"F_{id}_OBS",
                 type="observation",
                 location=None,
                 size_cm=None,
@@ -163,7 +163,7 @@ def ensure_case_id(entry: Optional[dict[str, Any]], requested_case_id: Optional[
 
 def build_report(
     *,
-    image_id: str,
+    id: str,
     caption: str,
     model: str,
     entry: Optional[dict[str, Any]],
@@ -172,7 +172,7 @@ def build_report(
 
     report_id = entry.get("report_id") if entry else None
     if not report_id:
-        report_id = f"R_{image_id}_{uuid4().hex[:8]}"
+        report_id = f"R_{id}_{uuid4().hex[:8]}"
     confidence = float(entry.get("vlm_confidence", 0.75)) if entry else 0.5
     return {
         "id": report_id,

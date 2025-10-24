@@ -72,7 +72,7 @@ def _format_report_label(report: Dict[str, Any]) -> str:
     return _combine_label(label, parts)
 
 
-def _render_path_lines(index: int, image_id: str, hit: Dict[str, Any]) -> List[str]:
+def _render_path_lines(index: int, id: str, hit: Dict[str, Any]) -> List[str]:
     finding = hit.get("f") or {}
     anatomy = hit.get("a") or {}
     report = hit.get("rep") or {}
@@ -82,7 +82,7 @@ def _render_path_lines(index: int, image_id: str, hit: Dict[str, Any]) -> List[s
     suffix = f" [score={score:.2f}]" if isinstance(score, (int, float)) else ""
 
     lines = [
-        f"{index}) (Image {image_id})-[HAS_FINDING]->({finding_label}){suffix}",
+        f"{index}) (Image {id})-[HAS_FINDING]->({finding_label}){suffix}",
     ]
 
     anatomy_label = _format_anatomy_label(anatomy)
@@ -91,12 +91,12 @@ def _render_path_lines(index: int, image_id: str, hit: Dict[str, Any]) -> List[s
 
     report_label = _format_report_label(report)
     if report_label:
-        lines.append(f"   (Image {image_id})-[DESCRIBED_BY]->({report_label})")
+        lines.append(f"   (Image {id})-[DESCRIBED_BY]->({report_label})")
 
     return lines
 
 
-def _build_evidence_paths(image_id: str, hits: Sequence[Dict[str, Any]]) -> List["EvidencePath"]:
+def _build_evidence_paths(id: str, hits: Sequence[Dict[str, Any]]) -> List["EvidencePath"]:
     evidence_paths: List[EvidencePath] = []
     for hit in hits:
         finding = hit.get("f") or {}
@@ -106,7 +106,7 @@ def _build_evidence_paths(image_id: str, hits: Sequence[Dict[str, Any]]) -> List
 
         finding_label = _format_finding_label(finding)
         triples: List[str] = [
-            f"(Image {image_id}) -[HAS_FINDING]-> ({finding_label})"
+            f"(Image {id}) -[HAS_FINDING]-> ({finding_label})"
         ]
 
         anatomy_label = _format_anatomy_label(anatomy)
@@ -115,7 +115,7 @@ def _build_evidence_paths(image_id: str, hits: Sequence[Dict[str, Any]]) -> List
 
         report_label = _format_report_label(report)
         if report_label:
-            triples.append(f"(Image {image_id}) -[DESCRIBED_BY]-> ({report_label})")
+            triples.append(f"(Image {id}) -[DESCRIBED_BY]-> ({report_label})")
 
         label = finding.get("type") or finding.get("id") or "Finding"
         if isinstance(score, (int, float)):
@@ -135,34 +135,34 @@ class GraphContextBuilder:
         if self._owns_repo:
             self._repo.close()
 
-    def build_prompt_context(self, image_id: str, k: int = 2, mode: str = "triples") -> str:
+    def build_prompt_context(self, id: str, k: int = 2, mode: str = "triples") -> str:
         mode_normalised = mode.lower()
         if mode_normalised not in {"triples", "json"}:
             raise ValueError("mode must be 'triples' or 'json'")
 
-        edge_rows = self._repo.query_edge_summary(image_id)
-        topk_records = self._repo.query_topk_paths(image_id, k)
+        edge_rows = self._repo.query_edge_summary(id)
+        topk_records = self._repo.query_topk_paths(id, k)
         hits = list(topk_records[0].get("hits", [])) if topk_records else []
-        facts = self._repo.query_facts(image_id)
+        facts = self._repo.query_facts(id)
 
         if mode_normalised == "json":
             return json_dumps_safe(facts)
 
         sections = [
             _format_edge_summary(edge_rows),
-            self._format_evidence_section(image_id, hits),
+            self._format_evidence_section(id, hits),
             "[FACTS JSON]",
             json_dumps_safe(facts),
         ]
         return "\n".join(section for section in sections if section)
 
-    def _format_evidence_section(self, image_id: str, hits: Sequence[Dict[str, Any]]) -> str:
+    def _format_evidence_section(self, id: str, hits: Sequence[Dict[str, Any]]) -> str:
         lines = ["[EVIDENCE PATHS (Top-k)]"]
         if not hits:
             lines.append("데이터 없음")
             return "\n".join(lines)
         for idx, hit in enumerate(hits, start=1):
-            lines.extend(_render_path_lines(idx, image_id, hit))
+            lines.extend(_render_path_lines(idx, id, hit))
         return "\n".join(lines)
 
 
@@ -176,7 +176,7 @@ class EvidencePath(BaseModel):
 class ContextFacts(BaseModel):
     """Normalised JSON facts injected alongside the evidence summary."""
 
-    image_id: str
+    id: str
     findings: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -200,16 +200,16 @@ class ContextPackBuilder:
         if self._owns_repo:
             self._repo.close()
 
-    def build(self, image_id: str, *, k: Optional[int] = None) -> ContextPack:
+    def build(self, id: str, *, k: Optional[int] = None) -> ContextPack:
         k_value = k or self.top_k_paths
-        edge_rows = self._repo.query_edge_summary(image_id)
-        topk_records = self._repo.query_topk_paths(image_id, k_value)
+        edge_rows = self._repo.query_edge_summary(id)
+        topk_records = self._repo.query_topk_paths(id, k_value)
         hits = list(topk_records[0].get("hits", [])) if topk_records else []
-        facts_raw = self._repo.query_facts(image_id)
+        facts_raw = self._repo.query_facts(id)
         facts = ContextFacts(**facts_raw)
 
         edge_summary = _format_edge_summary(edge_rows)
-        evidence_paths = _build_evidence_paths(image_id, hits)
+        evidence_paths = _build_evidence_paths(id, hits)
 
         return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
 

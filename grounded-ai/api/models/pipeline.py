@@ -21,7 +21,7 @@ class FindingModel(BaseModel):
 class ImageModel(BaseModel):
     """Metadata for an image node in the knowledge graph."""
 
-    image_id: str
+    id: str
     path: str
     modality: Optional[str] = None
 

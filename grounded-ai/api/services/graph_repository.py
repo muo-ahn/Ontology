@@ -31,7 +31,7 @@ class GraphRepository:
     def ensure_image(
         self,
         *,
-        image_id: str,
+        id: str,
         file_path: str,
         modality: Optional[str],
         patient_id: Optional[str],
@@ -40,10 +40,10 @@ class GraphRepository:
     ) -> None:
         tx = self._graph.begin()
         try:
-            image = Node("Image", id=image_id)
+            image = Node("Image", id=id)
             tx.merge(image, "Image", "id")
-            image["id"] = image_id
-            image["image_id"] = image_id
+            image["id"] = id
+            image["id"] = id
             image["file_path"] = file_path
             if modality:
                 image["modality"] = modality
@@ -63,17 +63,17 @@ class GraphRepository:
             tx.commit()
         except ClientError as exc:
             tx.rollback()
-            logger.error("Neo4j constraint error during ensure_image image_id=%s: %s", image_id, exc)
+            logger.error("Neo4j constraint error during ensure_image id=%s: %s", id, exc)
             raise
         except Exception:
             tx.rollback()
-            logger.exception("Failed to ensure image node image_id=%s", image_id)
+            logger.exception("Failed to ensure image node id=%s", id)
             raise
 
     def persist_inference(
         self,
         *,
-        image_id: str,
+        id: str,
         inference_id: str,
         properties: dict[str, Any],
         edge_properties: Optional[dict[str, Any]] = None,
@@ -94,10 +94,10 @@ class GraphRepository:
 
         tx = self._graph.begin()
         try:
-            image = Node("Image", id=image_id)
+            image = Node("Image", id=id)
             tx.merge(image, "Image", "id")
-            image["id"] = image_id
-            image["image_id"] = image_id
+            image["id"] = id
+            image["id"] = id
 
             inference = Node("AIInference", inference_id=inference_id)
             tx.merge(inference, "AIInference", "inference_id")
@@ -156,7 +156,7 @@ class GraphRepository:
                     "Idempotency",
                     key=idempotency_key,
                     inference_id=inference_id,
-                    image_id=image_id,
+                    id=id,
                     created_at=datetime.now(timezone.utc).isoformat(),
                 )
                 tx.merge(idem, "Idempotency", "key")
@@ -187,13 +187,13 @@ class GraphRepository:
         }
         return mapping.get(label, "id")
 
-    def set_image_embedding(self, image_id: str, embedding_id: str) -> None:
+    def set_image_embedding(self, id: str, embedding_id: str) -> None:
         self._graph.run(
             """
-            MATCH (img:Image {id: $image_id})
+            MATCH (img:Image {id: $id})
             SET img.embedding_id = $embedding_id
             """,
-            image_id=image_id,
+            id=id,
             embedding_id=embedding_id,
         )
 

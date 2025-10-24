@@ -23,7 +23,7 @@ class AnswerMode(str, Enum):
 
 class AnswerRequest(BaseModel):
     mode: AnswerMode = Field(..., description="Summary mode: V, VL, or VGL")
-    image_id: str = Field(..., description="Target image identifier")
+    id: str = Field(..., description="Target image identifier")
     caption: Optional[str] = Field(
         None,
         description="Caption text provided in V/VL modes",
@@ -118,7 +118,7 @@ async def answer_endpoint(
     try:
         context_text = await asyncio.to_thread(
             _CONTEXT_BUILDER.build_prompt_context,
-            payload.image_id,
+            payload.id,
             2,
             "triples",
         )

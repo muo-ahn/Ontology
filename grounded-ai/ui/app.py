@@ -37,7 +37,7 @@ llm_prompt = st.text_area(
     "LLM Follow-up Prompt",
     value="Given the vision summary, what follow-up actions or additional tests would you recommend?",
 )
-image_id = st.text_input(
+id = st.text_input(
     "Image ID (optional, links inference to existing Neo4j Image node)",
     value="",
 )
@@ -60,7 +60,7 @@ idempotency_key = st.text_input(
 )
 persist = st.checkbox(
     "Persist outputs to Neo4j",
-    value=bool(image_id),
+    value=bool(id),
     help="Stores both VLM and LLM outputs as AIInference nodes if an Image ID is provided.",
 )
 if st.button("Run Vision Model", disabled=uploaded_file is None):
@@ -74,8 +74,8 @@ if st.button("Run Vision Model", disabled=uploaded_file is None):
             "task": "caption",
             "persist": str(persist).lower(),
         }
-        if image_id.strip():
-            data["image_id"] = image_id.strip()
+        if id.strip():
+            data["id"] = id.strip()
         if modality.strip():
             data["modality"] = modality.strip()
         if patient_id.strip():
@@ -93,7 +93,7 @@ if st.button("Run Vision Model", disabled=uploaded_file is None):
             st.caption(
                 f"Model: {payload.get('vlm_model')} • Latency: {payload.get('vlm_latency_ms')} ms",
             )
-            st.caption(f"Image ID: {payload.get('image_id')}")
+            st.caption(f"Image ID: {payload.get('id')}")
             st.subheader("LLM Reasoning")
             st.info(payload.get("llm_output"))
             st.caption(
