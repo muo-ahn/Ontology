@@ -127,7 +127,7 @@ def _call_graph_upsert(client: httpx.Client, base_url: str, payload: Dict, timeo
 
 
 def _call_graph_context(client: httpx.Client, base_url: str, id: str, timeout: float) -> str:
-    params = {"id": id, "k": 2, "mode": "triples"}
+    params = {"image_id": id, "k": 2, "mode": "triples"}
     response = client.get(f"{base_url}/graph/context", params=params, timeout=timeout)
     response.raise_for_status()
     data = response.json()
@@ -155,7 +155,9 @@ def _evaluate_mode(outputs: List[str], latencies: List[float], entry: Dict | Non
 
 def _prepare_upsert_payload(entry: Dict | None, caption_data: Dict, image_path: Path, case_id: str) -> Dict:
     image_block = dict(caption_data.get("image", {}))
-    image_block["id"] = image_block.get("id") or image_block.get("id")
+    image_id = image_block.get("image_id") or image_block.get("id")
+    if image_id:
+        image_block["image_id"] = image_id
     image_block["path"] = str(image_path.resolve())
     image_block.setdefault("modality", (entry or {}).get("modality"))
 

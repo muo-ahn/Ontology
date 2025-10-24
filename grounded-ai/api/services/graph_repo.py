@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 UPSERT_CASE_QUERY = """
 MERGE (c:Case {id:$case_id})
-MERGE (i:Image {id:$image.id})
+MERGE (i:Image {image_id:$image.image_id})
 SET i.path=$image.path, i.modality=$image.modality
 MERGE (c)-[:HAS_IMAGE]->(i)
 MERGE (r:Report {id:$report.id})
@@ -38,23 +38,23 @@ FOREACH (_ IN CASE WHEN $idempotency_key IS NULL THEN [] ELSE [1] END |
   MERGE (token:Idempotency {key:$idempotency_key})
   ON CREATE SET token.created_at = datetime()
   SET token.case_id = $case_id,
-      token.image_id = $image.id,
+      token.image_id = $image.image_id,
       token.updated_at = datetime()
   MERGE (token)-[:FOR_CASE]->(c)
   MERGE (token)-[:FOR_IMAGE]->(i)
 )
-RETURN i.id AS image_id
+RETURN i.image_id AS image_id
 """
 
 EDGE_SUMMARY_QUERY = """
-MATCH (i:Image {id:$id})-[rel]->(x)
+MATCH (i:Image {image_id:$image_id})-[rel]->(x)
 WITH type(rel) AS reltype, count(*) AS cnt, round(avg(coalesce(rel.conf,0.5))*100)/100 AS avg_conf
 RETURN reltype, cnt, avg_conf
 ORDER BY cnt DESC, avg_conf DESC
 """
 
 TOPK_PATHS_QUERY = """
-MATCH (i:Image {id:$id})-[:HAS_FINDING]->(f:Finding)
+MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[r1:LOCATED_IN]->(a:Anatomy)
 OPTIONAL MATCH (i)-[r2:DESCRIBED_BY]->(rep:Report)
 WITH i,f,a, r1,rep, r2,
@@ -69,9 +69,9 @@ RETURN hits
 """
 
 FACTS_QUERY = """
-MATCH (i:Image {id:$id})-[:HAS_FINDING]->(f:Finding)
+MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-RETURN i.id AS id,
+RETURN i.image_id AS image_id,
        collect({type:f.type, location:a.name, size_cm:f.size_cm, conf:f.conf}) AS findings
 """
 
@@ -129,9 +129,11 @@ class GraphRepo:
         data = deepcopy(payload)
 
         image = data.get("image") or {}
-        image_id = image.get("id")
+        image_id = image.get("image_id") or image.get("id")
         if not image_id:
-            raise ValueError("image.id is required")
+            raise ValueError("image.image_id is required")
+        image["image_id"] = image_id
+        image.pop("id", None)
         data["image"] = image
 
         case_id = data.get("case_id")
@@ -168,17 +170,17 @@ class GraphRepo:
         rows = self._run_write(UPSERT_CASE_QUERY, parameters)
         if rows:
             return rows[0]
-        return {"image_id": parameters["image"]["id"]}
+        return {"image_id": parameters["image"]["image_id"]}
 
-    def query_edge_summary(self, id: str) -> List[Dict[str, Any]]:
-        return self._run_read(EDGE_SUMMARY_QUERY, {"id": id})
+    def query_edge_summary(self, image_id: str) -> List[Dict[str, Any]]:
+        return self._run_read(EDGE_SUMMARY_QUERY, {"image_id": image_id})
 
-    def query_topk_paths(self, id: str, k: int = 2) -> List[Dict[str, Any]]:
-        return self._run_read(TOPK_PATHS_QUERY, {"id": id, "k": k})
+    def query_topk_paths(self, image_id: str, k: int = 2) -> List[Dict[str, Any]]:
+        return self._run_read(TOPK_PATHS_QUERY, {"image_id": image_id, "k": k})
 
-    def query_facts(self, id: str) -> Dict[str, Any]:
-        records = self._run_read(FACTS_QUERY, {"id": id})
-        return records[0] if records else {"id": id, "findings": []}
+    def query_facts(self, image_id: str) -> Dict[str, Any]:
+        records = self._run_read(FACTS_QUERY, {"image_id": image_id})
+        return records[0] if records else {"image_id": image_id, "findings": []}
 
 
 __all__ = ["GraphRepo"]

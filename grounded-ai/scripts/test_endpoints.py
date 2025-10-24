@@ -33,7 +33,9 @@ def _ensure_image_id(path: Path) -> str:
 
 def _build_upsert_payload(caption: Dict[str, Any], case_id: str, default_path: Path) -> Dict[str, Any]:
     image_block = dict(caption.get("image", {}))
-    image_block.setdefault("id", image_block.get("id"))
+    image_id = image_block.get("image_id") or image_block.get("id")
+    if image_id:
+        image_block["image_id"] = image_id
     image_block.setdefault("path", f"/data/{default_path.name}")
 
     report_block = dict(caption.get("report", {}))
@@ -74,7 +76,12 @@ def _fallback_caption(image_id: str, image_path: Path) -> Dict[str, Any]:
     findings = entry.get("findings", [])
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     caption_data = {
-        "image": {"id": image_id, "path": f"/data/{image_path.name}", "modality": entry.get("modality")},
+        "image": {
+            "id": image_id,
+            "image_id": image_id,
+            "path": f"/data/{image_path.name}",
+            "modality": entry.get("modality"),
+        },
         "report": {
             "id": entry.get("report_id", f"r_{image_id.lower()}_dummy"),
             "text": entry.get("caption", ""),
@@ -143,11 +150,17 @@ def main() -> int:
         _print_section("POST /graph/upsert", upsert_resp.json())
 
         # 4. /graph/context (triples + json)
-        context_resp = client.get("/graph/context", params={"id": image_id, "mode": "triples", "k": 2})
+        context_resp = client.get(
+            "/graph/context",
+            params={"image_id": image_id, "mode": "triples", "k": 2},
+        )
         context_resp.raise_for_status()
         _print_section("GET /graph/context (mode=triples)", context_resp.json())
 
-        context_json_resp = client.get("/graph/context", params={"id": image_id, "mode": "json", "k": 2})
+        context_json_resp = client.get(
+            "/graph/context",
+            params={"image_id": image_id, "mode": "json", "k": 2},
+        )
         context_json_resp.raise_for_status()
         _print_section("GET /graph/context (mode=json)", context_json_resp.json())
 

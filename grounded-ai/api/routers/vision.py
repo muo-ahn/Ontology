@@ -136,7 +136,7 @@ class VisionInferenceResponse(BaseModel):
 async def _persist_inference(
     repo: GraphRepository,
     *,
-    id: str,
+    image_id: str,
     encounter_id: Optional[str],
     inference_id: str,
     model: str,
@@ -179,7 +179,7 @@ async def _persist_inference(
 
     return await asyncio.to_thread(
         repo.persist_inference,
-        id=id,
+        image_id=image_id,
         inference_id=inference_id,
         properties=properties,
         edge_properties=edge_properties,
@@ -194,7 +194,7 @@ async def _persist_inference(
 async def _ensure_image(
     repo: GraphRepository,
     *,
-    id: str,
+    image_id: str,
     file_path: str,
     modality: Optional[str],
     patient_id: Optional[str],
@@ -203,7 +203,7 @@ async def _ensure_image(
 ) -> None:
     await asyncio.to_thread(
         repo.ensure_image,
-        id=id,
+        image_id=image_id,
         file_path=file_path,
         modality=modality,
         patient_id=patient_id,
@@ -373,7 +373,7 @@ async def create_caption_response(
 
     image_path = resolved_path or payload.file_path or f"/data/{id}.png"
     image_model = ImageModel(
-        id=id,
+        image_id=id,
         path=image_path,
         modality=(entry or {}).get("modality"),
     )
@@ -407,12 +407,12 @@ async def create_caption_response(
             )
         )
 
-    response = CaptionResponse(
-        image=CaptionImage(
-            id=image_model.id,
-            path=image_model.path,
-            modality=image_model.modality,
-        ),
+        response = CaptionResponse(
+            image=CaptionImage(
+                id=image_model.image_id,
+                path=image_model.path,
+                modality=image_model.modality,
+            ),
         report=CaptionReport(
             id=report_model.id,
             text=report_model.text,
@@ -627,7 +627,7 @@ async def run_inference(
     if persist:
         await _ensure_image(
             graph_repo,
-            id=derived_id,
+            image_id=derived_id,
             file_path=str(stored_path),
             modality=modality,
             patient_id=patient_id,
@@ -645,7 +645,7 @@ async def run_inference(
 
         await _persist_inference(
             graph_repo,
-            id=derived_id,
+            image_id=derived_id,
             encounter_id=encounter_id,
             inference_id=vlm_inference_id,
             model=vlm_result.get("model", ""),
@@ -660,7 +660,7 @@ async def run_inference(
         )
         await _persist_inference(
             graph_repo,
-            id=derived_id,
+            image_id=derived_id,
             encounter_id=encounter_id,
             inference_id=llm_inference_id,
             model=llm_result.get("model", ""),

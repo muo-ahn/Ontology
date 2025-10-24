@@ -5,13 +5,13 @@ api/services/graph_repo.py 를 작성하세요. 기능:
     입력 예시:
     {
       "case_id":"C_001",
-      "image":{"id":"IMG_001","path":"/data/img_001.png","modality":"XR"},
+      "image":{"image_id":"IMG_001","path":"/data/img_001.png","modality":"XR"},
       "report":{"id":"r_1","text":"Chest X-ray – probable RUL nodule (~1.8 cm).","model":"qwen2-vl","conf":0.83,"ts":"2025-10-23T12:00:00"},
       "findings":[{"id":"f_1","type":"nodule","location":"RUL","size_cm":1.8,"conf":0.87}]
     }
     Cypher(엣지 필수):
       MERGE (c:Case {id:$case_id})
-      MERGE (i:Image {id:$image.id})
+      MERGE (i:Image {image_id:$image.image_id})
       ON CREATE SET i.path=$image.path, i.modality=$image.modality
       MERGE (c)-[:HAS_IMAGE]->(i)
       MERGE (r:Report {id:$report.id})
@@ -24,14 +24,14 @@ api/services/graph_repo.py 를 작성하세요. 기능:
       )
 
   - query_edge_summary(image_id: str) -> List[dict]
-    MATCH (i:Image {id:$image_id})-[rel]->(x)
+    MATCH (i:Image {image_id:$image_id})-[rel]->(x)
     WITH type(rel) AS reltype, count(*) AS cnt, round(avg(coalesce(rel.conf,0.5))*100)/100 AS avg_conf
     RETURN reltype, cnt, avg_conf
     ORDER BY cnt DESC, avg_conf DESC
 
   - query_topk_paths(image_id: str, k: int=2) -> List[dict]
     근거 경로 Top-k (score 기반):
-    MATCH (i:Image {id:$image_id})-[:HAS_FINDING]->(f:Finding)
+    MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
     OPTIONAL MATCH (f)-[r1:LOCATED_IN]->(a:Anatomy)
     OPTIONAL MATCH (i)-[r2:DESCRIBED_BY]->(rep:Report)
     WITH i,f,a, r1,rep, r2,
@@ -45,7 +45,7 @@ api/services/graph_repo.py 를 작성하세요. 기능:
     RETURN hits
 
   - query_facts(image_id: str) -> dict
-    MATCH (i:Image {id:$image_id})-[:HAS_FINDING]->(f:Finding)
+    MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
     OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-    RETURN i.id AS image_id,
+    RETURN i.image_id AS image_id,
            collect({type:f.type, location:a.name, size_cm:f.size_cm, conf:f.conf}) AS findings

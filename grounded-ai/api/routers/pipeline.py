@@ -151,7 +151,7 @@ def _normalise_vlm_output(
     normalized = {
         "case_id": identifiers["case_id"],
         "image": {
-            "id": identifiers["image_id"],
+            "image_id": identifiers["image_id"],
             "path": image_path,
             "modality": raw.get("modality"),
         },
@@ -245,7 +245,7 @@ async def analyze(
         current_stage = "context"
         with timeit(timings, "context_ms"):
             context_bundle = context_builder.build_bundle(
-                id=image_id,
+                image_id=image_id,
                 k=payload.k,
                 max_chars=GRAPH_TRIPLE_CHAR_CAP,
             )

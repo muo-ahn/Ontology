@@ -14,11 +14,22 @@ IMPORT_DIR ?= /var/lib/neo4j/import
 HOST_DATA    ?= ./data/medical_dummy
 CYpher_FILE  ?= ./scripts/seed.cypher
 CYpher_FILE_load_all  ?= ./scripts/load_all.cypher
+CYpher_MIGRATE_IMAGE ?= ./cypher/migrate_image_id.cypher
 
 # ------------------------------------------
 # 기본 명령
 # ------------------------------------------
-.PHONY: up down rebuild logs seed pull models clean db-cp db-load
+.PHONY: up down rebuild logs seed pull models clean db-cp db-load migrate-image-id
+
+## Image.id -> image_id property migration
+migrate-image-id:
+	@echo "🔄 Migrating Image.id to Image.image_id..."
+	@[ -f $(CYpher_MIGRATE_IMAGE) ] || { echo "❌ $(CYpher_MIGRATE_IMAGE) not found."; exit 1; }
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker cp $(CYpher_MIGRATE_IMAGE) $$cid:/tmp/migrate_image_id.cypher; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/migrate_image_id.cypher; \
+	docker exec -t $$cid rm -f /tmp/migrate_image_id.cypher;
 
 ## 컨테이너 기동 (FastAPI, Neo4j, Qdrant, UI)
 up:

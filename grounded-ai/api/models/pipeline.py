@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class FindingModel(BaseModel):
@@ -21,9 +21,19 @@ class FindingModel(BaseModel):
 class ImageModel(BaseModel):
     """Metadata for an image node in the knowledge graph."""
 
-    id: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    image_id: str
     path: str
     modality: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _promote_legacy_id(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "image_id" not in data and data.get("id"):
+            data = dict(data)
+            data["image_id"] = data["id"]
+        return data
 
 
 class ReportModel(BaseModel):

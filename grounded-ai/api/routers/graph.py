@@ -6,10 +6,10 @@ import logging
 import traceback
 from datetime import datetime
 from hashlib import sha1
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, condecimal, confloat, constr
+from pydantic import BaseModel, ConfigDict, condecimal, confloat, constr, model_validator
 
 from services.context_pack import GraphContextBuilder
 from services.graph_repo import GraphRepo
@@ -25,9 +25,19 @@ class FindingIn(BaseModel):
 
 
 class ImageIn(BaseModel):
-    id: constr(strip_whitespace=True, min_length=1)
+    model_config = ConfigDict(populate_by_name=True)
+
+    image_id: constr(strip_whitespace=True, min_length=1)
     path: Optional[str]
     modality: Optional[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _promote_legacy_id(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "image_id" not in data and data.get("id"):
+            data = dict(data)
+            data["image_id"] = data["id"]
+        return data
 
 
 class ReportIn(BaseModel):
@@ -67,7 +77,7 @@ def _generate_finding_id(image_id: str, finding: FindingIn) -> str:
 @router.post("/upsert")
 async def upsert_case(payload: UpsertReq) -> dict[str, object]:
     data = payload.model_dump(mode="python")
-    image_id: str = data["image"]["id"]
+    image_id: str = data["image"]["image_id"]
 
     report_data = data["report"]
     if not report_data.get("id"):
@@ -97,16 +107,32 @@ async def upsert_case(payload: UpsertReq) -> dict[str, object]:
 
 @router.get("/context")
 async def get_context(
-    id: str = Query(..., description="Target image identifier"),
+    image_id: Optional[str] = Query(
+        None,
+        description="Target image identifier (preferred parameter)",
+    ),
+    id: Optional[str] = Query(
+        None,
+        description="Legacy query parameter for the image identifier",
+    ),
     k: int = Query(2, ge=1, le=10, description="Top-k evidence paths to include"),
     mode: str = Query("triples", pattern="^(triples|json)$", description="triples → formatted summary, json → raw facts JSON"),
 ) -> dict[str, str]:
+    resolved_id = image_id or id
+    if not resolved_id:
+        raise HTTPException(status_code=422, detail="image_id is required")
     try:
-        context = _CONTEXT_BUILDER.build_prompt_context(id=id, k=k, mode=mode)
+        context = _CONTEXT_BUILDER.build_prompt_context(image_id=resolved_id, k=k, mode=mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - depends on external Neo4j state
-        logger.error("Graph context build failed for image_id=%s mode=%s k=%s: %s", id, mode, k, exc)
+        logger.error(
+            "Graph context build failed for image_id=%s mode=%s k=%s: %s",
+            resolved_id,
+            mode,
+            k,
+            exc,
+        )
         logger.debug("Graph context failure traceback:\n%s", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Graph context build failed: {exc}") from exc
     return {"context": context}
