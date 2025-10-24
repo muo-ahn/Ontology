@@ -96,6 +96,23 @@ Make sure `make up` (or `docker compose up`) is running, then walk through the e
    Swap `mode` between `V`, `VL`, and `VGL` to compare hallucination and consistency.
    `VGL` responses now return an edge-first `context_pack` (edge summary, evidence paths, facts) used for LLM prompting.
 
+## One-shot pipeline
+Trigger the entire `vLM → graph upsert → graph context → LLM` chain with a single request. The endpoint validates the vLM/LLM/Neo4j health gates, persists the case, and returns per-mode latencies plus the graph context bundle used for grounding.
+
+```bash
+curl -X POST "http://localhost:8000/pipeline/analyze?sync=true" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "case_id":"C_001",
+        "file_path":"data/medical_dummy/images/img_001.png",
+        "modes":["V","VL","VGL"],
+        "k":2,
+        "max_chars":30,
+        "fallback_to_vl":true,
+        "timeout_ms":20000
+      }'
+```
+
 ## System Architecture
 ```
 [Streamlit UI] → [FastAPI Orchestrator]

@@ -4,7 +4,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
-from routers import embed, graph, llm, vision
+from routers import embed, graph, health, llm, pipeline, vision
 from services.clip_embedder import ClipEmbedder
 from events.bus import EventBus
 from events.tracker import TaskStatusTracker
@@ -60,14 +60,10 @@ app = FastAPI(
 )
 
 
-@app.get("/health")
-async def healthcheck() -> dict[str, str]:
-    """Minimal readiness probe for Docker compose."""
-    return {"status": "ok"}
-
-
 # Router registration -------------------------------------------------------
+app.include_router(health.router)
 app.include_router(embed.router, prefix="/embed", tags=["embeddings"])
 app.include_router(graph.router, prefix="/graph", tags=["knowledge-graph"])
 app.include_router(llm.router, prefix="/llm", tags=["pipeline"])
+app.include_router(pipeline.router)
 app.include_router(vision.router, prefix="/vision", tags=["vision"])

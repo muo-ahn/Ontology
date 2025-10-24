@@ -7,7 +7,7 @@ import os
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -80,9 +80,87 @@ def get_llm(request: Request) -> LLMRunner:
     return runner
 
 
-def _normalise_one_line(text: str, limit: int) -> str:
+class LLMInputError(ValueError):
+    """Raised when required inputs for LLM prompting are missing."""
+
+
+def clamp_one_line(text: str, limit: int) -> str:
     cleaned = " ".join(text.split())
     return cleaned[:limit]
+
+
+def _caption_from_normalised(
+    normalized: Optional[Dict[str, Any]],
+    *,
+    error_message: str,
+) -> str:
+    if not normalized:
+        raise LLMInputError(error_message)
+    report = normalized.get("report") if isinstance(normalized, dict) else None
+    if not isinstance(report, dict):
+        raise LLMInputError(error_message)
+    caption = str(report.get("text") or "").strip()
+    if not caption:
+        raise LLMInputError(error_message)
+    return caption
+
+
+def run_v_mode(normalized: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
+    caption = _caption_from_normalised(normalized, error_message="caption is required for V mode")
+    return {"text": clamp_one_line(caption, max_chars), "latency_ms": 0}
+
+
+async def run_vl_mode(
+    llm: LLMRunner,
+    normalized: Dict[str, Any],
+    max_chars: int,
+) -> Dict[str, Any]:
+    caption = _caption_from_normalised(normalized, error_message="caption is required for VL mode")
+    prompt = V_TEMPLATE.format(caption=caption, max_chars=max_chars)
+    start = time.perf_counter()
+    result = await llm.generate(prompt, temperature=0.2)
+    answer = clamp_one_line(str(result.get("output", "")), max_chars)
+    latency_ms = _llm_latency(result, start)
+    return {"text": answer, "latency_ms": latency_ms}
+
+
+async def run_vgl_mode(
+    llm: LLMRunner,
+    image_id: Optional[str],
+    context_str: str,
+    max_chars: int,
+    fallback_to_vl: bool,
+    normalized: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not image_id:
+        raise LLMInputError("image_id is required for VGL mode")
+
+    context_clean = (context_str or "").strip()
+    start = time.perf_counter()
+    if context_clean:
+        prompt = VGL_TEMPLATE.format(graph_triples=context_clean, max_chars=max_chars)
+        result = await llm.generate(prompt, temperature=0.2)
+        answer = clamp_one_line(str(result.get("output", "")), max_chars)
+        latency_ms = _llm_latency(result, start)
+        return {"text": answer, "latency_ms": latency_ms, "degraded": False}
+
+    if not fallback_to_vl:
+        raise LLMInputError("empty graph context")
+
+    caption = None
+    try:
+        caption = _caption_from_normalised(
+            normalized,
+            error_message="caption is required for VL mode",
+        )
+    except LLMInputError:
+        caption = None
+    if not caption:
+        raise LLMInputError("caption is required for VL mode")
+
+    fallback_normalized: Dict[str, Any] = {"report": {"text": caption}}
+    fallback_result = await run_vl_mode(llm, fallback_normalized, max_chars)
+    return {**fallback_result, "degraded": "VL"}
 
 
 def _extract_error_detail(response: httpx.Response) -> str:
@@ -192,22 +270,26 @@ async def answer_endpoint(
     start = time.perf_counter()
 
     max_chars = payload.max_chars
+    normalized: Optional[Dict[str, Any]] = None
+    if payload.caption:
+        normalized = {"report": {"text": payload.caption}}
 
     if payload.mode == AnswerMode.V:
-        if not payload.caption:
-            raise HTTPException(status_code=422, detail="caption is required for V mode")
-        answer = _normalise_one_line(payload.caption, max_chars)
+        try:
+            result = run_v_mode(normalized or {}, max_chars)
+        except LLMInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         latency_ms = int((time.perf_counter() - start) * 1000)
-        return AnswerResponse(answer=answer, latency_ms=latency_ms)
+        if not result.get("latency_ms"):
+            result["latency_ms"] = latency_ms
+        return AnswerResponse(answer=result["text"], latency_ms=int(result["latency_ms"]))
 
     if payload.mode == AnswerMode.VL:
-        if not payload.caption:
-            raise HTTPException(status_code=422, detail="caption is required for VL mode")
-        prompt = V_TEMPLATE.format(caption=payload.caption, max_chars=max_chars)
-        result = await llm.generate(prompt, temperature=0.2)
-        answer = _normalise_one_line(str(result.get("output", "")), max_chars)
-        latency_ms = _llm_latency(result, start)
-        return AnswerResponse(answer=answer, latency_ms=latency_ms)
+        try:
+            result = await run_vl_mode(llm, normalized or {}, max_chars)
+        except LLMInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return AnswerResponse(answer=result["text"], latency_ms=int(result["latency_ms"]))
 
     # VGL mode
     if not payload.image_id:
@@ -215,23 +297,32 @@ async def answer_endpoint(
 
     context_text = await _fetch_graph_context(request, payload.image_id)
 
-    if not context_text:
-        if not payload.fallback_to_vl:
-            raise HTTPException(status_code=422, detail="empty graph context")
-        caption = payload.caption
-        if not caption:
-            caption = await _fetch_caption_from_vision(request, payload.image_id)
-        prompt = V_TEMPLATE.format(caption=caption, max_chars=max_chars)
-        result = await llm.generate(prompt, temperature=0.2)
-        answer = _normalise_one_line(str(result.get("output", "")), max_chars)
-        latency_ms = _llm_latency(result, start)
-        return AnswerResponse(answer=answer, latency_ms=latency_ms)
+    normalized_for_vgl = normalized
+    if not context_text and payload.fallback_to_vl and normalized_for_vgl is None:
+        caption = await _fetch_caption_from_vision(request, payload.image_id)
+        normalized_for_vgl = {"report": {"text": caption}}
 
-    prompt = VGL_TEMPLATE.format(graph_triples=context_text, max_chars=max_chars)
-    result = await llm.generate(prompt, temperature=0.2)
-    answer = _normalise_one_line(str(result.get("output", "")), max_chars)
-    latency_ms = _llm_latency(result, start)
-    return AnswerResponse(answer=answer, latency_ms=latency_ms)
+    try:
+        result = await run_vgl_mode(
+            llm,
+            payload.image_id,
+            context_text,
+            max_chars,
+            payload.fallback_to_vl,
+            normalized_for_vgl,
+        )
+    except LLMInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return AnswerResponse(answer=result["text"], latency_ms=int(result["latency_ms"]))
 
 
-__all__ = ["router"]
+__all__ = [
+    "router",
+    "get_llm",
+    "clamp_one_line",
+    "run_v_mode",
+    "run_vl_mode",
+    "run_vgl_mode",
+    "LLMInputError",
+]

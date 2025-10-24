@@ -54,3 +54,14 @@ class Neo4jClient:
             self._driver.close()  # type: ignore[attr-defined]
         except Exception:
             pass
+
+    async def health(self) -> bool:
+        """Check that Neo4j responds to a trivial read query."""
+
+        try:
+            rows = await self.run_query("RETURN 1 AS up")
+        except Exception:
+            return False
+        if not rows:
+            return False
+        return rows[0].get("up") == 1

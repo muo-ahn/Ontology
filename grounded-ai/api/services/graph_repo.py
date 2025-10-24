@@ -34,6 +34,16 @@ FOREACH (f IN $findings |
   SET fd.type=f.type, fd.location=f.location, fd.size_cm=f.size_cm, fd.conf=f.conf
   MERGE (i)-[:HAS_FINDING]->(fd)
 )
+FOREACH (_ IN CASE WHEN $idempotency_key IS NULL THEN [] ELSE [1] END |
+  MERGE (token:Idempotency {key:$idempotency_key})
+  ON CREATE SET token.created_at = datetime()
+  SET token.case_id = $case_id,
+      token.image_id = $image.id,
+      token.updated_at = datetime()
+  MERGE (token)-[:FOR_CASE]->(c)
+  MERGE (token)-[:FOR_IMAGE]->(i)
+)
+RETURN i.id AS image_id
 """
 
 EDGE_SUMMARY_QUERY = """
@@ -90,11 +100,15 @@ class GraphRepo:
         except Neo4jError:
             pass
 
-    def _run_write(self, query: str, parameters: Dict[str, Any]) -> None:
+    def _run_write(self, query: str, parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not self._driver:
             raise RuntimeError("Neo4j driver not initialised")
         with self._driver.session(database=self._database) as session:
-            session.execute_write(lambda tx: tx.run(query, parameters).consume())
+            def _work(tx):
+                result = tx.run(query, parameters)
+                return [record.data() for record in result]
+
+            return session.execute_write(_work)
 
     def _run_read(self, query: str, parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not self._driver:
@@ -120,6 +134,12 @@ class GraphRepo:
             raise ValueError("image.id is required")
         data["image"] = image
 
+        case_id = data.get("case_id")
+        if not case_id:
+            raise ValueError("case_id is required")
+
+        data["idempotency_key"] = payload.get("idempotency_key")
+
         report = data.get("report") or {}
         report_conf = report.get("conf")
         if report_conf is not None:
@@ -143,9 +163,12 @@ class GraphRepo:
 
         return data
 
-    def upsert_case(self, payload: Dict[str, Any]) -> None:
+    def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         parameters = self._prepare_upsert_parameters(payload)
-        self._run_write(UPSERT_CASE_QUERY, parameters)
+        rows = self._run_write(UPSERT_CASE_QUERY, parameters)
+        if rows:
+            return rows[0]
+        return {"image_id": parameters["image"]["id"]}
 
     def query_edge_summary(self, id: str) -> List[Dict[str, Any]]:
         return self._run_read(EDGE_SUMMARY_QUERY, {"id": id})

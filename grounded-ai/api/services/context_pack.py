@@ -135,26 +135,91 @@ class GraphContextBuilder:
         if self._owns_repo:
             self._repo.close()
 
-    def build_prompt_context(self, id: str, k: int = 2, mode: str = "triples") -> str:
+    def build_prompt_context(
+        self,
+        id: str,
+        k: int = 2,
+        mode: str = "triples",
+        *,
+        max_chars: int = 1800,
+    ) -> str:
         mode_normalised = mode.lower()
         if mode_normalised not in {"triples", "json"}:
             raise ValueError("mode must be 'triples' or 'json'")
 
-        edge_rows = self._repo.query_edge_summary(id)
-        topk_records = self._repo.query_topk_paths(id, k)
-        hits = list(topk_records[0].get("hits", [])) if topk_records else []
-        facts = self._repo.query_facts(id)
-
         if mode_normalised == "json":
+            facts = self._repo.query_facts(id)
             return json_dumps_safe(facts)
 
-        sections = [
-            _format_edge_summary(edge_rows),
-            self._format_evidence_section(id, hits),
-            "[FACTS JSON]",
-            json_dumps_safe(facts),
+        bundle = self.build_bundle(id=id, k=k, max_chars=max_chars)
+        return bundle["triples"]
+
+    def build_bundle(
+        self,
+        id: str,
+        *,
+        k: int = 2,
+        max_chars: int = 1800,
+        hard_trim: bool = True,
+    ) -> Dict[str, Any]:
+        if k < 0:
+            raise ValueError("k must be >= 0")
+
+        edge_rows = self._repo.query_edge_summary(id)
+        facts_raw = self._repo.query_facts(id)
+        facts = ContextFacts(**facts_raw)
+        facts_payload = facts.model_dump(mode="python")
+
+        summary_text = _format_edge_summary(edge_rows)
+        current_k = max(k, 0)
+
+        def _render(current_hits: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+            evidence_paths = _build_evidence_paths(id, current_hits)
+            evidence_section = self._format_evidence_section(id, current_hits)
+            sections = [
+                summary_text,
+                evidence_section,
+                "[FACTS JSON]",
+                json_dumps_safe(facts_payload),
+            ]
+            triples_text = "\n".join(section for section in sections if section)
+            return {
+                "summary_text": summary_text,
+                "evidence_paths": evidence_paths,
+                "triples_text": triples_text,
+            }
+
+        hits = []
+        while True:
+            topk_records = self._repo.query_topk_paths(id, current_k)
+            hits = list(topk_records[0].get("hits", [])) if topk_records else []
+            rendered = _render(hits)
+            triples_text = rendered["triples_text"]
+            if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
+                if current_k == 0:
+                    break
+                current_k -= 1
+                continue
+            break
+
+        rendered = _render(hits)
+        triples_text = rendered["triples_text"]
+        if max_chars and max_chars > 0 and len(triples_text) > max_chars and hard_trim:
+            trimmed = triples_text[: max_chars - 1].rstrip()
+            triples_text = f"{trimmed}…"
+
+        summary_lines = [line for line in rendered["summary_text"].splitlines() if line]
+        paths_payload = [
+            {"label": path.label, "triples": path.triples}
+            for path in rendered["evidence_paths"]
         ]
-        return "\n".join(section for section in sections if section)
+
+        return {
+            "summary": summary_lines,
+            "paths": paths_payload,
+            "facts": facts_payload,
+            "triples": triples_text,
+        }
 
     def _format_evidence_section(self, id: str, hits: Sequence[Dict[str, Any]]) -> str:
         lines = ["[EVIDENCE PATHS (Top-k)]"]

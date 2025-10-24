@@ -106,3 +106,16 @@ class VLMRunner:
             asyncio.run(client.aclose())  # type: ignore[union-attr]
         else:
             loop.create_task(client.aclose())  # type: ignore[arg-type]
+
+    async def health(self) -> bool:
+        """Return True when the backing vision-language endpoint is reachable."""
+
+        client = self._client
+        if client is None:
+            return True
+        try:
+            response = await client.get(f"{self.base_url}/api/tags")
+            response.raise_for_status()
+        except Exception:
+            return False
+        return True

@@ -99,3 +99,16 @@ class LLMRunner:
             asyncio.run(client.aclose())  # type: ignore[union-attr]
         else:
             loop.create_task(client.aclose())  # type: ignore[arg-type]
+
+    async def health(self) -> bool:
+        """Lightweight readiness probe for the underlying Ollama endpoint."""
+
+        client = self._client
+        if client is None:  # Offline/dev fallback still counts as healthy.
+            return True
+        try:
+            response = await client.get(f"{self.base_url}/api/tags")
+            response.raise_for_status()
+        except Exception:
+            return False
+        return True
