@@ -173,6 +173,32 @@ def main() -> int:
         vgl_resp.raise_for_status()
         _print_section("POST /llm/answer (mode=VGL)", vgl_resp.json())
 
+        # 6. /vision/inference (multipart)
+        inference_files = {
+            "image": (image_path.name, image_bytes, "image/png"),
+        }
+        inference_form = {
+            "prompt": "Summarise the key findings in this medical image.",
+            "llm_prompt": "Provide a concise follow-up recommendation.",
+            "task": "caption",
+            "temperature": "0.2",
+            "llm_temperature": "0.2",
+            "id": image_id,
+            "modality": caption_data.get("image", {}).get("modality") or "XR",
+            "persist": "false",
+        }
+        try:
+            inference_resp = client.post("/vision/inference", data=inference_form, files=inference_files)
+            inference_resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 422:
+                _print_section("POST /vision/inference (422 validation error)", exc.response.json())
+            else:
+                _print_section("POST /vision/inference (error)", exc.response.text)
+            raise
+        else:
+            _print_section("POST /vision/inference", inference_resp.json())
+
     print("\nAll endpoints responded successfully ✅")
     return 0
 
