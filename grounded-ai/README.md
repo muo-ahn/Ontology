@@ -104,7 +104,7 @@ curl -X POST "http://localhost:8000/pipeline/analyze?sync=true" \
   -H "Content-Type: application/json" \
   -d '{
         "case_id":"C_001",
-        "file_path":"data/medical_dummy/images/img_001.png",
+        "file_path":"/data/medical_dummy/images/img_001.png",
         "modes":["V","VL","VGL"],
         "k":2,
         "max_chars":30,
