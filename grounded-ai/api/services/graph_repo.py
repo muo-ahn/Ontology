@@ -30,7 +30,12 @@ FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [1] ELSE [] END |
 )
 MERGE (i)-[:DESCRIBED_BY]->(r)
 FOREACH (f IN $findings |
-  MERGE (fd:Finding {id:f.id})
+  MERGE (fd:Finding {
+    id: coalesce(
+      f.id,
+      $image.image_id + '|' + toLower(coalesce(f.type,'')) + '|' + toLower(coalesce(f.location,'')) + '|' + toString(round(coalesce(f.size_cm,0),1))
+    )
+  })
   SET fd.type=f.type, fd.location=f.location, fd.size_cm=f.size_cm, fd.conf=f.conf
   MERGE (i)-[:HAS_FINDING]->(fd)
 )
@@ -47,10 +52,21 @@ RETURN i.image_id AS image_id
 """
 
 EDGE_SUMMARY_QUERY = """
-MATCH (i:Image {image_id:$image_id})-[rel]->(x)
-WITH type(rel) AS reltype, count(*) AS cnt, round(avg(coalesce(rel.conf,0.5))*100)/100 AS avg_conf
-RETURN reltype, cnt, avg_conf
-ORDER BY cnt DESC, avg_conf DESC
+MATCH (i:Image {image_id:$image_id})
+WITH i
+OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
+WITH i,
+     count(f) AS cnt_f,
+     round(coalesce(avg(f.conf), 0.0), 2) AS avg_f
+WITH i,
+     CASE WHEN cnt_f = 0 THEN [] ELSE [{rel:'HAS_FINDING', cnt: cnt_f, avg_conf: avg_f}] END AS summary
+OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(r:Report)
+WITH summary,
+     count(r) AS cnt_r,
+     round(coalesce(avg(r.conf), 0.0), 2) AS avg_r
+WITH summary + CASE WHEN cnt_r = 0 THEN [] ELSE [{rel:'DESCRIBED_BY', cnt: cnt_r, avg_conf: avg_r}] END AS combined
+UNWIND combined AS row
+RETURN row.rel AS rel, row.cnt AS cnt, row.avg_conf AS avg_conf
 """
 
 TOPK_PATHS_QUERY = """

@@ -22,6 +22,7 @@ from services.graph_repo import GraphRepo
 from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
 from services.vlm_runner import VLMRunner
+from utils.dedup import dedup_findings
 
 from .llm import LLMInputError, get_llm, run_v_mode, run_vgl_mode, run_vl_mode
 
@@ -211,7 +212,8 @@ async def analyze(
             normalized_report["conf"] = 0.8
         normalized["report"] = normalized_report
 
-        normalized_findings = list(normalized.get("findings") or [])
+        normalized_findings = dedup_findings(list(normalized.get("findings") or []))
+        normalized["findings"] = normalized_findings
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
@@ -221,7 +223,7 @@ async def analyze(
             "case_id": case_id,
             "image": normalized["image"],
             "report": normalized["report"],
-            "findings": normalized["findings"],
+            "findings": normalized_findings,
             "idempotency_key": payload.idempotency_key,
         }
         with timeit(timings, "upsert_ms"):

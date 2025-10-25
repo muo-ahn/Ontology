@@ -19,7 +19,7 @@ CYpher_MIGRATE_IMAGE ?= ./cypher/migrate_image_id.cypher
 # ------------------------------------------
 # 기본 명령
 # ------------------------------------------
-.PHONY: up down rebuild logs seed pull models clean db-cp db-load migrate-image-id
+.PHONY: up down rebuild logs seed pull models clean db-cp db-load migrate-image-id migrate-constraints
 
 ## Image.id -> image_id property migration
 migrate-image-id:
@@ -30,6 +30,10 @@ migrate-image-id:
 	docker cp $(CYpher_MIGRATE_IMAGE) $$cid:/tmp/migrate_image_id.cypher; \
 	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/migrate_image_id.cypher; \
 	docker exec -t $$cid rm -f /tmp/migrate_image_id.cypher;
+
+.PHONY: migrate-constraints
+migrate-constraints:
+	cypher-shell -u $${NEO4J_USER} -p $${NEO4J_PASS} -f cypher/migrate_constraints.cypher
 
 ## 컨테이너 기동 (FastAPI, Neo4j, Qdrant, UI)
 up:
