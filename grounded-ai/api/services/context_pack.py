@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from .graph_repo import GraphRepo
+from utils.dedup import dedup_paths
 
 
 def json_dumps_safe(obj: Any, *, indent: int = 2) -> str:
@@ -15,18 +16,22 @@ def json_dumps_safe(obj: Any, *, indent: int = 2) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=indent)
 
 
-def _format_edge_summary(rows: Sequence[Dict[str, Any]]) -> str:
+def _render_edge_summary_lines(rows: Sequence[Dict[str, Any]]) -> List[str]:
     lines = ["[EDGE SUMMARY]"]
     if not rows:
         lines.append("데이터 없음")
-        return "\n".join(lines)
+        return lines
     for row in rows:
-        rel = row.get("reltype") or "UNKNOWN"
+        rel = row.get("rel") or row.get("reltype") or "UNKNOWN"
         cnt = row.get("cnt", 0)
         avg_conf = row.get("avg_conf")
-        conf_str = "?" if avg_conf is None else f"{avg_conf:.2f}"
+        conf_str = "?" if avg_conf is None else f"{float(avg_conf):.2f}"
         lines.append(f"{rel}: cnt={cnt}, avg_conf={conf_str}")
-    return "\n".join(lines)
+    return lines
+
+
+def _format_edge_summary(rows: Sequence[Dict[str, Any]]) -> str:
+    return "\n".join(_render_edge_summary_lines(rows))
 
 
 def _combine_label(label: str, parts: List[str]) -> str:
@@ -208,11 +213,12 @@ class GraphContextBuilder:
             trimmed = triples_text[: max_chars - 1].rstrip()
             triples_text = f"{trimmed}…"
 
-        summary_lines = [line for line in rendered["summary_text"].splitlines() if line]
+        summary_lines = [line for line in _render_edge_summary_lines(edge_rows) if line]
         paths_payload = [
             {"label": path.label, "triples": path.triples}
             for path in rendered["evidence_paths"]
         ]
+        paths_payload = dedup_paths(paths_payload)
 
         return {
             "summary": summary_lines,
@@ -285,6 +291,10 @@ class ContextPackBuilder:
 
         edge_summary = _format_edge_summary(edge_rows)
         evidence_paths = _build_evidence_paths(image_id, hits)
+        deduped_path_dicts = dedup_paths(
+            [{"label": path.label, "triples": path.triples} for path in evidence_paths]
+        )
+        evidence_paths = [EvidencePath(**path_dict) for path_dict in deduped_path_dicts]
 
         return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
 

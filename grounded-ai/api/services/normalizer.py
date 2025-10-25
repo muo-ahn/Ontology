@@ -50,7 +50,8 @@ def _derive_image_id(file_path: str) -> str:
 
 
 def _derive_report_id(image_id: str, text: str, model: Optional[str]) -> str:
-    seed = "|".join([image_id.strip().lower(), text.strip().lower(), (model or "").strip().lower()])
+    key_text = (text or "")[:256]
+    seed = f"{image_id}|{key_text}|{model or ''}"
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
     return f"R_{digest}"
 

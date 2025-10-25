@@ -6,13 +6,14 @@ import logging
 import traceback
 from datetime import datetime
 from hashlib import sha1
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, condecimal, confloat, constr
 
 from services.context_pack import GraphContextBuilder
 from services.graph_repo import GraphRepo
+from utils.dedup import dedup_findings
 
 logger = logging.getLogger(__name__)
 
@@ -53,32 +54,39 @@ _GRAPH_REPO = GraphRepo.from_env()
 _CONTEXT_BUILDER = GraphContextBuilder(_GRAPH_REPO)
 
 
-def _generate_report_id(image_id: str, report: ReportIn) -> str:
-    seed = f"{image_id}|{report.text[:64]}|{report.model or ''}"
-    return "r_" + sha1(seed.encode("utf-8")).hexdigest()[:16]
+def _generate_report_id(image_id: str, report: Mapping[str, Any]) -> str:
+    text = (report.get("text") or "")[:256]
+    model = report.get("model") or ""
+    seed = f"{image_id}|{text}|{model}"
+    return "R_" + sha1(seed.encode("utf-8")).hexdigest()[:12]
 
 
-def _generate_finding_id(image_id: str, finding: FindingIn) -> str:
-    seed = (
-        f"{image_id}|{finding.type}|{finding.location or ''}|"
-        f"{round(finding.size_cm or 0, 1)}"
-    )
+def _generate_finding_id(image_id: str, finding: Mapping[str, Any]) -> str:
+    f_type = finding.get("type") or ""
+    location = finding.get("location") or ""
+    size_cm = finding.get("size_cm") or 0
+    try:
+        size_val = round(float(size_cm), 1)
+    except Exception:
+        size_val = 0.0
+    seed = f"{image_id}|{f_type}|{location}|{size_val}"
     return "f_" + sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
 @router.post("/upsert")
 async def upsert_case(payload: UpsertReq) -> dict[str, object]:
     data = payload.model_dump(mode="python")
+    data["findings"] = dedup_findings(data.get("findings") or [])
     image_id: str = data["image"]["image_id"]
 
     report_data = data["report"]
     if not report_data.get("id"):
-        report_data["id"] = _generate_report_id(image_id, payload.report)
+        report_data["id"] = _generate_report_id(image_id, report_data)
 
     finding_ids: List[str] = []
-    for idx, finding_data in enumerate(data.get("findings", [])):
+    for finding_data in data.get("findings", []):
         if not finding_data.get("id"):
-            generated_id = _generate_finding_id(image_id, payload.findings[idx])
+            generated_id = _generate_finding_id(image_id, finding_data)
             finding_data["id"] = generated_id
         finding_ids.append(finding_data["id"])
 
