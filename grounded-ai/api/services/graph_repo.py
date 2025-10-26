@@ -4,6 +4,7 @@ Lightweight repository for Neo4j interactions that power the edge-first context 
 
 from __future__ import annotations
 
+import hashlib
 import os
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
@@ -15,13 +16,30 @@ from neo4j.exceptions import Neo4jError  # type: ignore
 
 logger = logging.getLogger(__name__)
 
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("Invalid float for %s=%s; falling back to %s", name, value, default)
+        return default
+
+
+PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
+PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
+
 UPSERT_CASE_QUERY = """
 MERGE (c:Case {id:$case_id})
 MERGE (i:Image {image_id:$image.image_id})
 SET i.path=$image.path, i.modality=$image.modality
 MERGE (c)-[:HAS_IMAGE]->(i)
 MERGE (r:Report {id:$report.id})
-SET r.text=$report.text, r.model=$report.model, r.conf=$report.conf
+SET r.text=$report.text,
+    r.model=$report.model,
+    r.conf=$report.conf
 FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [] ELSE [1] END |
   SET r.ts = datetime($report_ts)
 )
@@ -36,7 +54,10 @@ FOREACH (f IN $findings |
       $image.image_id + '|' + toLower(coalesce(f.type,'')) + '|' + toLower(coalesce(f.location,'')) + '|' + toString(round(coalesce(f.size_cm,0),1))
     )
   })
-  SET fd.type=f.type, fd.location=f.location, fd.size_cm=f.size_cm, fd.conf=f.conf
+  SET fd.type=f.type,
+      fd.location=f.location,
+      fd.size_cm=f.size_cm,
+      fd.conf=f.conf
   MERGE (i)-[:HAS_FINDING]->(fd)
 )
 FOREACH (_ IN CASE WHEN $idempotency_key IS NULL THEN [] ELSE [1] END |
@@ -51,10 +72,10 @@ FOREACH (_ IN CASE WHEN $idempotency_key IS NULL THEN [] ELSE [1] END |
 RETURN i.image_id AS image_id
 """
 
-EDGE_SUMMARY_QUERY = """
+BUNDLE_QUERY = """
 MATCH (i:Image {image_id:$image_id})
-WITH i
 OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
+OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
 WITH i,
      count(f) AS cnt_f,
      round(coalesce(avg(f.conf), 0.0), 2) AS avg_f
@@ -87,8 +108,59 @@ RETURN hits
 FACTS_QUERY = """
 MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-RETURN i.image_id AS image_id,
-       collect({type:f.type, location:coalesce(a.name, f.location), size_cm:f.size_cm, conf:f.conf}) AS findings
+OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(rep:Report)
+WITH i, f, a, rep,
+     toLower(coalesce(f.type, 'finding')) AS f_type,
+     coalesce(f.id, '?') AS f_id,
+     coalesce(a.name, f.location, '') AS location,
+     toFloat(coalesce(f.size_cm, 0)) AS size_cm,
+     coalesce(f.conf, 0) AS finding_conf,
+     coalesce(rep.conf, 0) AS report_conf,
+     coalesce(rep.id, '?') AS rep_id,
+     coalesce(rep.model, '') AS rep_model,
+     coalesce(toString(rep.ts), '') AS rep_ts
+WITH i, f_type, f_id, location, size_cm, finding_conf, report_conf, rep, rep_id, rep_model, rep_ts,
+     finding_conf * $alpha_finding + report_conf * $beta_report AS score
+WITH i, f_type, f_id, location, size_cm, finding_conf, report_conf, rep, rep_id, rep_model, rep_ts, score,
+     CASE WHEN f_id <> '?' THEN f_type + '#' + f_id ELSE f_type END AS finding_label
+WITH i, finding_label, location, size_cm, finding_conf, report_conf, rep, rep_id, rep_model, rep_ts, score,
+     '(Image ' + i.image_id + ')-[HAS_FINDING]->(' + finding_label +
+         ' | location=' + location +
+         ', size_cm=' + toString(round(size_cm, 2)) +
+         ', conf=' + toString(round(finding_conf, 2)) + ')' AS finding_triple,
+     CASE
+         WHEN location = '' THEN NULL
+         ELSE '(' + finding_label + ')-[LOCATED_IN]->(' + location + ')'
+     END AS location_triple,
+     CASE
+         WHEN rep IS NULL THEN NULL
+         ELSE '(Image ' + i.image_id + ')-[DESCRIBED_BY]->(Report#' + rep_id +
+              ' | model=' + rep_model +
+              ', conf=' + toString(round(report_conf, 2)) +
+              ', ts=' + rep_ts + ')'
+     END AS report_triple
+WITH i, finding_label, score,
+     [t IN [finding_triple, location_triple, report_triple] WHERE t IS NOT NULL] AS triples
+WITH i,
+     CASE
+         WHEN score IS NULL THEN finding_label
+         ELSE finding_label + ' [score=' + toString(round(score, 2)) + ']'
+     END AS label,
+     triples,
+     score
+ORDER BY score DESC, label
+WITH i,
+     collect({label: label, triples: triples, score: score}) AS raw_paths
+WITH i,
+     reduce(acc = [], path IN raw_paths |
+         CASE
+             WHEN any(existing IN acc WHERE existing.label = path.label AND existing.triples = path.triples)
+                 THEN acc
+             ELSE acc + [path]
+         END
+     ) AS deduped
+WITH [p IN deduped | {label: p.label, triples: p.triples, score: p.score}][0..$k] AS sliced
+RETURN [p IN sliced | {label: p.label, triples: p.triples}] AS paths
 """
 
 
@@ -163,6 +235,11 @@ class GraphRepo:
         if report_conf is not None:
             report["conf"] = float(report_conf)
 
+        if not report.get("id"):
+            key = f"{image_id}|{(report.get('text') or '')[:256]}|{report.get('model') or ''}"
+            digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+            report["id"] = f"R_{digest}"
+
         ts_value = report.pop("ts", None)
         if ts_value is not None and not isinstance(ts_value, str):
             ts_value = ts_value.isoformat()
@@ -188,15 +265,28 @@ class GraphRepo:
             return rows[0]
         return {"image_id": parameters["image"]["image_id"]}
 
-    def query_edge_summary(self, image_id: str) -> List[Dict[str, Any]]:
-        return self._run_read(EDGE_SUMMARY_QUERY, {"image_id": image_id})
+    def query_bundle(self, image_id: str) -> Dict[str, Any]:
+        records = self._run_read(BUNDLE_QUERY, {"image_id": image_id})
+        default = {"image_id": image_id, "summary": [], "facts": {"image_id": image_id, "findings": []}}
+        if not records:
+            return default
+        bundle = records[0].get("bundle") if isinstance(records[0], dict) else None
+        if not bundle:
+            return default
+        return bundle
 
-    def query_topk_paths(self, image_id: str, k: int = 2) -> List[Dict[str, Any]]:
-        return self._run_read(TOPK_PATHS_QUERY, {"image_id": image_id, "k": k})
-
-    def query_facts(self, image_id: str) -> Dict[str, Any]:
-        records = self._run_read(FACTS_QUERY, {"image_id": image_id})
-        return records[0] if records else {"image_id": image_id, "findings": []}
+    def query_paths(self, image_id: str, k: int = 2) -> List[Dict[str, Any]]:
+        params = {
+            "image_id": image_id,
+            "k": k,
+            "alpha_finding": PATH_SCORE_ALPHA_FINDING,
+            "beta_report": PATH_SCORE_BETA_REPORT,
+        }
+        records = self._run_read(PATHS_QUERY, params)
+        if not records:
+            return []
+        paths = records[0].get("paths") if isinstance(records[0], dict) else None
+        return list(paths or [])
 
 
 __all__ = ["GraphRepo"]

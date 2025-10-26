@@ -18,11 +18,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from services.context_pack import GraphContextBuilder
+from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
 from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
 from services.vlm_runner import VLMRunner
-from utils.dedup import dedup_findings
 
 from .llm import LLMInputError, get_llm, run_v_mode, run_vgl_mode, run_vl_mode
 

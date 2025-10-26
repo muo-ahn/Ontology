@@ -12,8 +12,8 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, condecimal, confloat, constr
 
 from services.context_pack import GraphContextBuilder
+from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
-from utils.dedup import dedup_findings
 
 logger = logging.getLogger(__name__)
 

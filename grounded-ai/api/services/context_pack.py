@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from .graph_repo import GraphRepo
-from utils.dedup import dedup_paths
 
 
 def json_dumps_safe(obj: Any, *, indent: int = 2) -> str:
@@ -34,98 +33,12 @@ def _format_edge_summary(rows: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(_render_edge_summary_lines(rows))
 
 
-def _combine_label(label: str, parts: List[str]) -> str:
-    if not parts:
-        return label
-    return f"{label} | {', '.join(parts)}"
-
-
-def _format_finding_label(finding: Dict[str, Any]) -> str:
-    label = finding.get("type") or finding.get("id") or "Finding"
-    if finding.get("id"):
-        label = f"{label}#{finding['id']}"
-    parts: List[str] = []
-    if finding.get("location"):
-        parts.append(f"location={finding['location']}")
-    if finding.get("size_cm") is not None:
-        parts.append(f"size_cm={finding['size_cm']}")
-    if finding.get("conf") is not None:
-        parts.append(f"conf={finding['conf']:.2f}")
-    return _combine_label(label, parts)
-
-
-def _format_anatomy_label(anatomy: Dict[str, Any]) -> str:
-    if not anatomy:
-        return ""
-    label = anatomy.get("name") or anatomy.get("id") or "Anatomy"
-    if anatomy.get("id") and anatomy.get("name"):
-        label = f"{label}#{anatomy['id']}"
-    return label
-
-
-def _format_report_label(report: Dict[str, Any]) -> str:
-    if not report:
-        return ""
-    label = f"Report#{report.get('id')}" if report.get("id") else "Report"
-    parts: List[str] = []
-    if report.get("model"):
-        parts.append(f"model={report['model']}")
-    if report.get("conf") is not None:
-        parts.append(f"conf={report['conf']:.2f}")
-    if report.get("ts"):
-        parts.append(f"ts={report['ts']}")
-    return _combine_label(label, parts)
-
-
-def _render_path_lines(index: int, image_id: str, hit: Dict[str, Any]) -> List[str]:
-    finding = hit.get("f") or {}
-    anatomy = hit.get("a") or {}
-    report = hit.get("rep") or {}
-    score = hit.get("score")
-
-    finding_label = _format_finding_label(finding)
-    suffix = f" [score={score:.2f}]" if isinstance(score, (int, float)) else ""
-
-    lines = [
-        f"{index}) (Image {image_id})-[HAS_FINDING]->({finding_label}){suffix}",
-    ]
-
-    anatomy_label = _format_anatomy_label(anatomy)
-    if anatomy_label:
-        lines.append(f"   ({finding_label})-[LOCATED_IN]->({anatomy_label})")
-
-    report_label = _format_report_label(report)
-    if report_label:
-        lines.append(f"   (Image {image_id})-[DESCRIBED_BY]->({report_label})")
-
-    return lines
-
-
-def _build_evidence_paths(image_id: str, hits: Sequence[Dict[str, Any]]) -> List["EvidencePath"]:
+def _build_evidence_paths(paths: Sequence[Dict[str, Any]]) -> List["EvidencePath"]:
     evidence_paths: List[EvidencePath] = []
-    for hit in hits:
-        finding = hit.get("f") or {}
-        anatomy = hit.get("a") or {}
-        report = hit.get("rep") or {}
-        score = hit.get("score")
-
-        finding_label = _format_finding_label(finding)
-        triples: List[str] = [
-            f"(Image {image_id}) -[HAS_FINDING]-> ({finding_label})"
-        ]
-
-        anatomy_label = _format_anatomy_label(anatomy)
-        if anatomy_label:
-            triples.append(f"({finding_label}) -[LOCATED_IN]-> ({anatomy_label})")
-
-        report_label = _format_report_label(report)
-        if report_label:
-            triples.append(f"(Image {image_id}) -[DESCRIBED_BY]-> ({report_label})")
-
-        label = finding.get("type") or finding.get("id") or "Finding"
-        if isinstance(score, (int, float)):
-            label = f"{label} [score={score:.2f}]"
-        evidence_paths.append(EvidencePath(label=label, triples=triples))
+    for path in paths:
+        label = path.get("label") or ""
+        triples = path.get("triples") or []
+        evidence_paths.append(EvidencePath(label=label, triples=list(triples)))
     return evidence_paths
 
 
@@ -153,8 +66,9 @@ class GraphContextBuilder:
             raise ValueError("mode must be 'triples' or 'json'")
 
         if mode_normalised == "json":
-            facts = self._repo.query_facts(image_id)
-            return json_dumps_safe(facts)
+            bundle = self._repo.query_bundle(image_id)
+            facts = ContextFacts(**bundle.get("facts", {"image_id": image_id, "findings": []}))
+            return json_dumps_safe(facts.model_dump(mode="python"))
 
         bundle = self.build_bundle(image_id=image_id, k=k, max_chars=max_chars)
         return bundle["triples"]
@@ -170,17 +84,18 @@ class GraphContextBuilder:
         if k < 0:
             raise ValueError("k must be >= 0")
 
-        edge_rows = self._repo.query_edge_summary(image_id)
-        facts_raw = self._repo.query_facts(image_id)
-        facts = ContextFacts(**facts_raw)
+        bundle_payload = self._repo.query_bundle(image_id)
+        summary_rows = bundle_payload.get("summary", [])
+        facts_data = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
+        facts = ContextFacts(**facts_data)
         facts_payload = facts.model_dump(mode="python")
 
-        summary_text = _format_edge_summary(edge_rows)
+        summary_text = _format_edge_summary(summary_rows)
         current_k = max(k, 0)
 
-        def _render(current_hits: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-            evidence_paths = _build_evidence_paths(image_id, current_hits)
-            evidence_section = self._format_evidence_section(image_id, current_hits)
+        def _render(current_paths: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+            evidence_paths = _build_evidence_paths(current_paths)
+            evidence_section = self._format_evidence_section(evidence_paths)
             sections = [
                 summary_text,
                 evidence_section,
@@ -194,11 +109,10 @@ class GraphContextBuilder:
                 "triples_text": triples_text,
             }
 
-        hits = []
+        paths_rows: Sequence[Dict[str, Any]] = []
         while True:
-            topk_records = self._repo.query_topk_paths(image_id, current_k)
-            hits = list(topk_records[0].get("hits", [])) if topk_records else []
-            rendered = _render(hits)
+            paths_rows = self._repo.query_paths(image_id, current_k)
+            rendered = _render(paths_rows)
             triples_text = rendered["triples_text"]
             if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
                 if current_k == 0:
@@ -207,18 +121,17 @@ class GraphContextBuilder:
                 continue
             break
 
-        rendered = _render(hits)
+        rendered = _render(paths_rows)
         triples_text = rendered["triples_text"]
         if max_chars and max_chars > 0 and len(triples_text) > max_chars and hard_trim:
             trimmed = triples_text[: max_chars - 1].rstrip()
             triples_text = f"{trimmed}…"
 
-        summary_lines = [line for line in _render_edge_summary_lines(edge_rows) if line]
+        summary_lines = [line for line in _render_edge_summary_lines(summary_rows) if line]
         paths_payload = [
             {"label": path.label, "triples": path.triples}
             for path in rendered["evidence_paths"]
         ]
-        paths_payload = dedup_paths(paths_payload)
 
         return {
             "summary": summary_lines,
@@ -227,13 +140,15 @@ class GraphContextBuilder:
             "triples": triples_text,
         }
 
-    def _format_evidence_section(self, image_id: str, hits: Sequence[Dict[str, Any]]) -> str:
+    def _format_evidence_section(self, paths: Sequence["EvidencePath"]) -> str:
         lines = ["[EVIDENCE PATHS (Top-k)]"]
-        if not hits:
+        if not paths:
             lines.append("데이터 없음")
             return "\n".join(lines)
-        for idx, hit in enumerate(hits, start=1):
-            lines.extend(_render_path_lines(idx, image_id, hit))
+        for idx, path in enumerate(paths, start=1):
+            lines.append(f"{idx}) {path.label}")
+            for triple in path.triples:
+                lines.append(f"   {triple}")
         return "\n".join(lines)
 
 
@@ -283,18 +198,14 @@ class ContextPackBuilder:
 
     def build(self, image_id: str, *, k: Optional[int] = None) -> ContextPack:
         k_value = k or self.top_k_paths
-        edge_rows = self._repo.query_edge_summary(image_id)
-        topk_records = self._repo.query_topk_paths(image_id, k_value)
-        hits = list(topk_records[0].get("hits", [])) if topk_records else []
-        facts_raw = self._repo.query_facts(image_id)
-        facts = ContextFacts(**facts_raw)
+        bundle_payload = self._repo.query_bundle(image_id)
+        summary_rows = bundle_payload.get("summary", [])
+        facts_payload = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
+        facts = ContextFacts(**facts_payload)
 
-        edge_summary = _format_edge_summary(edge_rows)
-        evidence_paths = _build_evidence_paths(image_id, hits)
-        deduped_path_dicts = dedup_paths(
-            [{"label": path.label, "triples": path.triples} for path in evidence_paths]
-        )
-        evidence_paths = [EvidencePath(**path_dict) for path_dict in deduped_path_dicts]
+        edge_summary = _format_edge_summary(summary_rows)
+        path_rows = self._repo.query_paths(image_id, k_value)
+        evidence_paths = _build_evidence_paths(path_rows)
 
         return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
 

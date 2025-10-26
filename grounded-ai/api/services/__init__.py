@@ -1,6 +1,7 @@
 """Service layer helpers for the orchestration API."""
 
 from .clip_embedder import ClipEmbedder  # noqa: F401
+from .dedup import dedup_findings, dedup_paths  # noqa: F401
 from .graph_repository import GraphRepository  # noqa: F401
 from .llm_runner import LLMRunner  # noqa: F401
 from .neo4j_client import Neo4jClient  # noqa: F401
@@ -9,6 +10,8 @@ from .vlm_runner import VLMRunner  # noqa: F401
 
 __all__ = [
     "ClipEmbedder",
+    "dedup_findings",
+    "dedup_paths",
     "GraphRepository",
     "LLMRunner",
     "Neo4jClient",
