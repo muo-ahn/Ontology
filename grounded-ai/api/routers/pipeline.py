@@ -244,6 +244,8 @@ async def analyze(
         }
         with timeit(timings, "upsert_ms"):
             upsert_receipt = graph_repo.upsert_case(graph_payload)
+        finding_ids = upsert_receipt.get("finding_ids") or []
+
         if debug:
             debug_blob.update({
                 "stage": "post_upsert",
@@ -271,12 +273,15 @@ async def analyze(
         facts: Any = {}
         paths: Any = []
         try:
-            facts = context_bundle.get("facts") or {}
-            paths = context_bundle.get("paths") or []
+            facts = (context_bundle.get("facts") or {})
+            paths = (context_bundle.get("paths") or [])
+            
             if (isinstance(facts.get("findings"), list) and not facts["findings"]) and not paths:
-                no_graph_evidence = True
+                no_graph_evidence = (len(finding_ids) == 0) and (len(facts.get("findings") or []) == 0) and (len(paths) == 0)
+
         except Exception:
             pass
+        
         if debug:
             debug_blob.update({
                 "stage": "context",

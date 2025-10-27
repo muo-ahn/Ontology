@@ -32,44 +32,56 @@ PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
 PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
-MERGE (c:Case {id:$case_id})
-MERGE (i:Image {image_id:$image.image_id})
-SET i.path=$image.path, i.modality=$image.modality
-MERGE (c)-[:HAS_IMAGE]->(i)
-MERGE (r:Report {id:$report.id})
-SET r.text=$report.text,
-    r.model=$report.model,
-    r.conf=$report.conf
-FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [] ELSE [1] END |
-  SET r.ts = datetime($report_ts)
-)
-FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [1] ELSE [] END |
-  REMOVE r.ts
-)
-MERGE (i)-[:DESCRIBED_BY]->(r)
-FOREACH (f IN $findings |
+// graph_repo.py 내부 upsert 전용 Cypher를 '정확히' 이렇게 교체
+
+MERGE (i:Image {image_id: $image.image_id})
+SET  i.path = $image.path,
+     i.modality = $image.modality
+
+WITH i, $report AS r
+CALL {
+  WITH i, r
+  WITH i, r WHERE r IS NOT NULL
+  MERGE (rep:Report {id: r.id})
+  SET   rep.text  = r.text,
+        rep.model = r.model,
+        rep.conf  = coalesce(r.conf, 0.0),
+        rep.ts    = CASE WHEN r.ts IS NULL THEN NULL ELSE datetime(r.ts) END
+  MERGE (i)-[:DESCRIBED_BY]->(rep)
+  RETURN collect(rep.id) AS _rep_ids
+}
+WITH i
+
+// 빈 배열이어도 반드시 1행 유지
+WITH i, coalesce($findings, []) AS fs
+WITH i, CASE WHEN size(fs)=0 THEN [NULL] ELSE fs END AS safe_fs
+UNWIND safe_fs AS f
+
+// f=NULL이면 스킵, 아니면 업서트
+CALL {
+  WITH i, f
+  WITH i, f WHERE f IS NOT NULL
   MERGE (fd:Finding {
     id: coalesce(
       f.id,
-      $image.image_id + '|' + toLower(coalesce(f.type,'')) + '|' + toLower(coalesce(f.location,'')) + '|' + toString(round(coalesce(f.size_cm,0),1))
+      i.image_id + '|' +
+      toLower(coalesce(f.type, '')) + '|' +
+      toLower(coalesce(f.location, '')) + '|' +
+      toString(round(coalesce(toFloat(f.size_cm), 0.0), 1))
     )
   })
-  SET fd.type=f.type,
-      fd.location=f.location,
-      fd.size_cm=f.size_cm,
-      fd.conf=f.conf
+  SET  fd.type     = f.type,
+       fd.location = f.location,
+       fd.size_cm  = toFloat(coalesce(f.size_cm, 0.0)),
+       fd.conf     = toFloat(coalesce(f.conf, 0.0))
   MERGE (i)-[:HAS_FINDING]->(fd)
-)
-FOREACH (_ IN CASE WHEN $idempotency_key IS NULL THEN [] ELSE [1] END |
-  MERGE (token:Idempotency {key:$idempotency_key})
-  ON CREATE SET token.created_at = datetime()
-  SET token.case_id = $case_id,
-      token.image_id = $image.image_id,
-      token.updated_at = datetime()
-  MERGE (token)-[:FOR_CASE]->(c)
-  MERGE (token)-[:FOR_IMAGE]->(i)
-)
-RETURN i.image_id AS image_id
+  RETURN fd.id AS fid
+}
+WITH i, collect(fid) AS finding_ids_raw
+
+RETURN
+  i.image_id AS image_id,
+  [x IN finding_ids_raw WHERE x IS NOT NULL] AS finding_ids;
 """
 
 BUNDLE_QUERY = """
@@ -259,11 +271,23 @@ class GraphRepo:
         return data
 
     def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        parameters = self._prepare_upsert_parameters(payload)
-        rows = self._run_write(UPSERT_CASE_QUERY, parameters)
-        if rows:
-            return rows[0]
-        return {"image_id": parameters["image"]["image_id"]}
+        params = {
+            "image": payload["image"],
+            "report": payload.get("report"),
+            "findings": payload.get("findings") or [],
+        }
+
+        def _tx_fn(tx):
+            rec = tx.run(UPSERT_CASE_QUERY, params).single()
+            if rec is None:
+                return {"image_id": params["image"]["image_id"], "finding_ids": []}
+            return {
+                "image_id": rec.get("image_id"),
+                "finding_ids": rec.get("finding_ids") or []
+            }
+
+        # Neo4j 5.x 권장
+        return self._driver.execute_write(_tx_fn)
 
     def query_bundle(self, image_id: str) -> Dict[str, Any]:
         records = self._run_read(BUNDLE_QUERY, {"image_id": image_id})
