@@ -137,6 +137,7 @@ async def analyze(
     payload: AnalyzeReq,
     request: Request,
     sync: bool = Query(True, description="Synchronous execution toggle"),
+    debug: bool = Query(False, description="Emit pre/post-upsert diagnostics"),
     llm: LLMRunner = Depends(get_llm),
     vlm: VLMRunner = Depends(_get_vlm),
 ) -> Dict[str, Any]:
@@ -212,8 +213,23 @@ async def analyze(
             normalized_report["conf"] = 0.8
         normalized["report"] = normalized_report
 
+        # Normalize + dedup findings (keep list[dict] invariant)
         normalized_findings = dedup_findings(list(normalized.get("findings") or []))
         normalized["findings"] = normalized_findings
+
+        debug_blob: Dict[str, Any] = {}
+        if debug:
+            debug_blob.update({
+                "stage": "pre_upsert",
+                "normalized_image": {
+                    "image_id": normalized_image.get("image_id"),
+                    "path": normalized_image.get("path"),
+                    "modality": normalized_image.get("modality"),
+                },
+                "pre_upsert_findings_len": len(normalized_findings),
+                "pre_upsert_findings_head": normalized_findings[:2],
+                "pre_upsert_report_conf": normalized_report.get("conf"),
+            })
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
@@ -227,7 +243,17 @@ async def analyze(
             "idempotency_key": payload.idempotency_key,
         }
         with timeit(timings, "upsert_ms"):
-            graph_repo.upsert_case(graph_payload)
+            upsert_receipt = graph_repo.upsert_case(graph_payload)
+        if debug:
+            debug_blob["upsert_receipt"] = upsert_receipt
+
+        persisted_f_cnt = 0
+        try:
+            persisted_f_cnt = len(upsert_receipt.get("finding_ids") or [])
+        except Exception:
+            pass
+        if debug and len(normalized_findings) > 0 and persisted_f_cnt == 0:
+            errors.append({"stage": "upsert", "msg": "normalized findings present but upsert returned no finding_ids"})
 
         current_stage = "context"
         with timeit(timings, "context_ms"):
@@ -236,6 +262,21 @@ async def analyze(
                 k=payload.k,
                 max_chars=GRAPH_TRIPLE_CHAR_CAP,
             )
+
+        no_graph_evidence = False
+        facts: Any = {}
+        paths: Any = []
+        try:
+            facts = context_bundle.get("facts") or {}
+            paths = context_bundle.get("paths") or []
+            if (isinstance(facts.get("findings"), list) and not facts["findings"]) and not paths:
+                no_graph_evidence = True
+        except Exception:
+            pass
+        if debug:
+            debug_blob["context_summary"] = context_bundle.get("summary")
+            debug_blob["context_findings_len"] = len((facts.get("findings") or []) if isinstance(facts, dict) else [])
+            debug_blob["context_paths_len"] = len(paths) if isinstance(paths, list) else 0
 
         results: Dict[str, Dict[str, Any]] = {}
 
@@ -264,7 +305,7 @@ async def analyze(
             results["VL"] = vl_result
 
         if "VGL" in payload.modes:
-            if normalized_findings:
+            if normalized_findings or not no_graph_evidence:
                 current_stage = "llm_vgl"
                 start = time.perf_counter()
                 try:
@@ -296,7 +337,10 @@ async def analyze(
                         vl_result.setdefault("latency_ms", timings["llm_vl_ms"])
                         results.setdefault("VL", vl_result)
                     timings["llm_vgl_ms"] = 0
-                    results["VGL"] = {**vl_result, "degraded": "VL"}
+                    vgl_payload = {**vl_result, "degraded": "VL"} if isinstance(vl_result, dict) else {"text": "", "latency_ms": 0, "degraded": "VL"}
+                    if debug:
+                        vgl_payload["reason"] = "graph_evidence_missing_or_findings_empty"
+                    results["VGL"] = vgl_payload
                 else:
                     timings["llm_vgl_ms"] = 0
                     results["VGL"] = {"text": "Graph findings unavailable", "latency_ms": 0, "degraded": False}
@@ -310,6 +354,8 @@ async def analyze(
             "timings": timings,
             "errors": errors,
         }
+        if debug:
+            response["debug"] = debug_blob
         return response
 
     except HTTPException:

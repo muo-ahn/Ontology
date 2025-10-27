@@ -282,7 +282,7 @@ class GraphRepo:
             "alpha_finding": PATH_SCORE_ALPHA_FINDING,
             "beta_report": PATH_SCORE_BETA_REPORT,
         }
-        records = self._run_read(PATHS_QUERY, params)
+        records = self._run_read(TOPK_PATHS_QUERY, params)
         if not records:
             return []
         paths = records[0].get("paths") if isinstance(records[0], dict) else None
