@@ -32,46 +32,44 @@ PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
 PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
-// Image
-MERGE (i:Image {image_id: $image.image_id})
-SET i.path = $image.path,
-    i.modality = $image.modality
-
-// Report (옵션)
-WITH i, $report AS r
-CALL {
-  WITH i, r
-  WITH i, r WHERE r IS NOT NULL
-  MERGE (rep:Report {id: r.id})
-  SET rep.text  = r.text,
-      rep.model = r.model,
-      rep.conf  = coalesce(r.conf, 0.0),
-      rep.ts    = datetime(r.ts)
-  MERGE (i)-[:DESCRIBED_BY]->(rep)
-  RETURN collect(rep.id) AS _report_ids
-}
-WITH i
-
-// Findings (0..N)
-UNWIND coalesce($findings, []) AS f
-WITH i, f
-MERGE (fd:Finding {
-  id: coalesce(
-        f.id,
-        i.image_id + '|' +
-        toLower(coalesce(f.type,'')) + '|' +
-        toLower(coalesce(f.location,'')) + '|' +
-        toString(round(coalesce(f.size_cm,0),1))
-      )
-})
-SET fd.type    = f.type,
-    fd.location= f.location,
-    fd.size_cm = toFloat(coalesce(f.size_cm, 0)),
-    fd.conf    = toFloat(coalesce(f.conf, 0))
-MERGE (i)-[:HAS_FINDING]->(fd)
-WITH i, collect(fd.id) AS finding_ids
-
-RETURN i.image_id AS image_id, finding_ids;
+MERGE (c:Case {id:$case_id})
+MERGE (i:Image {image_id:$image.image_id})
+SET i.path=$image.path, i.modality=$image.modality
+MERGE (c)-[:HAS_IMAGE]->(i)
+MERGE (r:Report {id:$report.id})
+SET r.text=$report.text,
+    r.model=$report.model,
+    r.conf=$report.conf
+FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [] ELSE [1] END |
+  SET r.ts = datetime($report_ts)
+)
+FOREACH (_ IN CASE WHEN $report_ts IS NULL THEN [1] ELSE [] END |
+  REMOVE r.ts
+)
+MERGE (i)-[:DESCRIBED_BY]->(r)
+FOREACH (f IN $findings |
+  MERGE (fd:Finding {
+    id: coalesce(
+      f.id,
+      $image.image_id + '|' + toLower(coalesce(f.type,'')) + '|' + toLower(coalesce(f.location,'')) + '|' + toString(round(coalesce(f.size_cm,0),1))
+    )
+  })
+  SET fd.type=f.type,
+      fd.location=f.location,
+      fd.size_cm=f.size_cm,
+      fd.conf=f.conf
+  MERGE (i)-[:HAS_FINDING]->(fd)
+)
+FOREACH (_ IN CASE WHEN $idempotency_key IS NULL THEN [] ELSE [1] END |
+  MERGE (token:Idempotency {key:$idempotency_key})
+  ON CREATE SET token.created_at = datetime()
+  SET token.case_id = $case_id,
+      token.image_id = $image.image_id,
+      token.updated_at = datetime()
+  MERGE (token)-[:FOR_CASE]->(c)
+  MERGE (token)-[:FOR_IMAGE]->(i)
+)
+RETURN i.image_id AS image_id
 """
 
 BUNDLE_QUERY = """
@@ -260,23 +258,12 @@ class GraphRepo:
 
         return data
 
-    def upsert_case(self, payload: dict) -> dict:
-        cypher = """
-        // (위 Cypher 그대로 붙이기)
-        """
-        params = {
-            "image": payload["image"],
-            "report": payload.get("report"),
-            "findings": payload.get("findings") or [],
-        }
-        with self._driver.session() as s:
-            rec = s.run(cypher, params).single()
-            if rec is None:
-                return {"image_id": params["image"]["image_id"], "finding_ids": []}
-            return {
-                "image_id": rec["image_id"],
-                "finding_ids": rec["finding_ids"] or [],
-            }
+    def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        parameters = self._prepare_upsert_parameters(payload)
+        rows = self._run_write(UPSERT_CASE_QUERY, parameters)
+        if rows:
+            return rows[0]
+        return {"image_id": parameters["image"]["image_id"]}
 
     def query_bundle(self, image_id: str) -> Dict[str, Any]:
         records = self._run_read(BUNDLE_QUERY, {"image_id": image_id})
