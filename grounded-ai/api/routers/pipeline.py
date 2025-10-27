@@ -245,7 +245,11 @@ async def analyze(
         with timeit(timings, "upsert_ms"):
             upsert_receipt = graph_repo.upsert_case(graph_payload)
         if debug:
-            debug_blob["upsert_receipt"] = upsert_receipt
+            debug_blob.update({
+                "stage": "post_upsert",
+                "upsert_receipt": upsert_receipt,
+                "post_upsert_finding_ids": (upsert_receipt or {}).get("finding_ids", [])[:5],
+            })
 
         persisted_f_cnt = 0
         try:
@@ -274,9 +278,14 @@ async def analyze(
         except Exception:
             pass
         if debug:
-            debug_blob["context_summary"] = context_bundle.get("summary")
-            debug_blob["context_findings_len"] = len((facts.get("findings") or []) if isinstance(facts, dict) else [])
-            debug_blob["context_paths_len"] = len(paths) if isinstance(paths, list) else 0
+            debug_blob.update({
+                "stage": "context",
+                "context_summary": context_bundle.get("summary"),
+                "context_findings_len": len((facts.get("findings") or []) if isinstance(facts, dict) else []),
+                "context_findings_head": (facts.get("findings") or [])[:2] if isinstance(facts, dict) else [],
+                "context_paths_len": len(paths) if isinstance(paths, list) else 0,
+                "context_paths_head": paths[:2] if isinstance(paths, list) else [],
+            })
 
         results: Dict[str, Dict[str, Any]] = {}
 
