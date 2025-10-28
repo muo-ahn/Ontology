@@ -87,19 +87,41 @@ RETURN
 BUNDLE_QUERY = """
 MATCH (i:Image {image_id:$image_id})
 OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
-OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
 WITH i,
+     collect(f) AS findings,
      count(f) AS cnt_f,
      round(coalesce(avg(f.conf), 0.0), 2) AS avg_f
-WITH i,
-     CASE WHEN cnt_f = 0 THEN [] ELSE [{rel:'HAS_FINDING', cnt: cnt_f, avg_conf: avg_f}] END AS summary
 OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(r:Report)
-WITH summary,
+WITH i,
+     findings,
+     cnt_f,
+     avg_f,
      count(r) AS cnt_r,
      round(coalesce(avg(r.conf), 0.0), 2) AS avg_r
-WITH summary + CASE WHEN cnt_r = 0 THEN [] ELSE [{rel:'DESCRIBED_BY', cnt: cnt_r, avg_conf: avg_r}] END AS combined
-UNWIND combined AS row
-RETURN row.rel AS rel, row.cnt AS cnt, row.avg_conf AS avg_conf
+WITH i,
+     (CASE
+         WHEN cnt_f = 0 THEN []
+         ELSE [{rel:'HAS_FINDING', cnt: cnt_f, avg_conf: avg_f}]
+      END) +
+     (CASE
+         WHEN cnt_r = 0 THEN []
+         ELSE [{rel:'DESCRIBED_BY', cnt: cnt_r, avg_conf: avg_r}]
+      END) AS summary,
+     [f IN findings WHERE f IS NOT NULL | {
+         id: f.id,
+         type: f.type,
+         location: f.location,
+         size_cm: f.size_cm,
+         conf: f.conf
+     }] AS finding_rows
+RETURN {
+  image_id: i.image_id,
+  summary: summary,
+  facts: {
+    image_id: i.image_id,
+    findings: finding_rows
+  }
+} AS bundle
 """
 
 TOPK_PATHS_QUERY = """
@@ -116,65 +138,6 @@ ORDER BY score DESC, f_ts DESC
 WITH i, collect({f:f{.*}, a:a{.*}, rep:rep{.*}, score:score})[0..$k] AS hits
 RETURN hits
 """
-
-FACTS_QUERY = """
-MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
-OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(rep:Report)
-WITH i, f, a, rep,
-     toLower(coalesce(f.type, 'finding')) AS f_type,
-     coalesce(f.id, '?') AS f_id,
-     coalesce(a.name, f.location, '') AS location,
-     toFloat(coalesce(f.size_cm, 0)) AS size_cm,
-     coalesce(f.conf, 0) AS finding_conf,
-     coalesce(rep.conf, 0) AS report_conf,
-     coalesce(rep.id, '?') AS rep_id,
-     coalesce(rep.model, '') AS rep_model,
-     coalesce(toString(rep.ts), '') AS rep_ts
-WITH i, f_type, f_id, location, size_cm, finding_conf, report_conf, rep, rep_id, rep_model, rep_ts,
-     finding_conf * $alpha_finding + report_conf * $beta_report AS score
-WITH i, f_type, f_id, location, size_cm, finding_conf, report_conf, rep, rep_id, rep_model, rep_ts, score,
-     CASE WHEN f_id <> '?' THEN f_type + '#' + f_id ELSE f_type END AS finding_label
-WITH i, finding_label, location, size_cm, finding_conf, report_conf, rep, rep_id, rep_model, rep_ts, score,
-     '(Image ' + i.image_id + ')-[HAS_FINDING]->(' + finding_label +
-         ' | location=' + location +
-         ', size_cm=' + toString(round(size_cm, 2)) +
-         ', conf=' + toString(round(finding_conf, 2)) + ')' AS finding_triple,
-     CASE
-         WHEN location = '' THEN NULL
-         ELSE '(' + finding_label + ')-[LOCATED_IN]->(' + location + ')'
-     END AS location_triple,
-     CASE
-         WHEN rep IS NULL THEN NULL
-         ELSE '(Image ' + i.image_id + ')-[DESCRIBED_BY]->(Report#' + rep_id +
-              ' | model=' + rep_model +
-              ', conf=' + toString(round(report_conf, 2)) +
-              ', ts=' + rep_ts + ')'
-     END AS report_triple
-WITH i, finding_label, score,
-     [t IN [finding_triple, location_triple, report_triple] WHERE t IS NOT NULL] AS triples
-WITH i,
-     CASE
-         WHEN score IS NULL THEN finding_label
-         ELSE finding_label + ' [score=' + toString(round(score, 2)) + ']'
-     END AS label,
-     triples,
-     score
-ORDER BY score DESC, label
-WITH i,
-     collect({label: label, triples: triples, score: score}) AS raw_paths
-WITH i,
-     reduce(acc = [], path IN raw_paths |
-         CASE
-             WHEN any(existing IN acc WHERE existing.label = path.label AND existing.triples = path.triples)
-                 THEN acc
-             ELSE acc + [path]
-         END
-     ) AS deduped
-WITH [p IN deduped | {label: p.label, triples: p.triples, score: p.score}][0..$k] AS sliced
-RETURN [p IN sliced | {label: p.label, triples: p.triples}] AS paths
-"""
-
 
 class GraphRepo:
     def __init__(self, uri: str, user: str, pwd: str, database: Optional[str] = None) -> None:
