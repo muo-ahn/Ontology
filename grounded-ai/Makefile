@@ -19,7 +19,7 @@ CYpher_MIGRATE_IMAGE ?= ./cypher/migrate_image_id.cypher
 # ------------------------------------------
 # 기본 명령
 # ------------------------------------------
-.PHONY: up down rebuild logs seed pull models clean db-cp db-load migrate-image-id migrate-constraints
+.PHONY: up down rebuild logs seed pull models clean db-cp db-load migrate-image-id migrate-constraints verify-pipeline-debug
 
 ## Image.id -> image_id property migration
 migrate-image-id:
@@ -79,6 +79,10 @@ clean:
 	@echo "🧽 Cleaning build artifacts..."
 	docker system prune -f
 	rm -rf ./__pycache__ */__pycache__ .pytest_cache || true
+
+## /pipeline/analyze 디버그 필드 검증 (cURL + jq)
+verify-pipeline-debug:
+	@./scripts/verify_pipeline_debug.sh
 
 # ------------------------------------------
 # 유틸리티

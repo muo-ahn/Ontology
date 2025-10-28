@@ -286,8 +286,10 @@ class GraphRepo:
                 "finding_ids": rec.get("finding_ids") or []
             }
 
-        # Neo4j 5.x 권장
-        return self._driver.execute_write(_tx_fn)
+        if hasattr(self._driver, "execute_write"):
+            return self._driver.execute_write(_tx_fn)
+        with self._driver.session(database=self._database) as session:
+            return session.write_transaction(_tx_fn)
 
     def query_bundle(self, image_id: str) -> Dict[str, Any]:
         records = self._run_read(BUNDLE_QUERY, {"image_id": image_id})

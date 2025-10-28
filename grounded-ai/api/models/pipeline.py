@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
@@ -53,3 +53,16 @@ class KGUpsertRequest(BaseModel):
     image: ImageModel
     report: ReportModel
     findings: list[FindingModel] = Field(default_factory=list)
+
+
+class AnalyzeResp(BaseModel):
+    """HTTP response envelope for the /pipeline/analyze endpoint."""
+
+    ok: bool
+    case_id: Optional[str] = None
+    image_id: Optional[str] = None
+    graph_context: Dict[str, Any] = Field(default_factory=dict)
+    results: Dict[str, Any] = Field(default_factory=dict)
+    timings: Dict[str, int] = Field(default_factory=dict)
+    errors: List[Dict[str, str]] = Field(default_factory=list)
+    debug: Dict[str, Any] = Field(default_factory=dict)

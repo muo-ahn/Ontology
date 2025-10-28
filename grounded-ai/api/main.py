@@ -4,7 +4,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
-from routers import embed, graph, health, llm, pipeline, vision
+from routers import embed, graph, health, llm, pipeline, vision, diag
 from services.clip_embedder import ClipEmbedder
 from events.bus import EventBus
 from events.tracker import TaskStatusTracker
@@ -67,3 +67,4 @@ app.include_router(graph.router, prefix="/graph", tags=["knowledge-graph"])
 app.include_router(llm.router, prefix="/llm", tags=["pipeline"])
 app.include_router(pipeline.router)
 app.include_router(vision.router, prefix="/vision", tags=["vision"])
+app.include_router(diag.router)

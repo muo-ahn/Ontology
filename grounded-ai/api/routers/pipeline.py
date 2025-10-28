@@ -17,6 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
+from models.pipeline import AnalyzeResp
 from services.context_pack import GraphContextBuilder
 from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
@@ -82,6 +83,16 @@ def _get_vlm(request: Request) -> VLMRunner:
     return runner
 
 
+def _is_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def _slugify(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
     if not cleaned:
@@ -132,19 +143,28 @@ async def _ensure_dependencies(request: Request) -> None:
                 raise HTTPException(status_code=503, detail={"ok": False, "where": label})
 
 
-@router.post("/analyze")
+@router.post(
+    "/analyze",
+    response_model=AnalyzeResp,
+    response_model_exclude_none=False,
+)
 async def analyze(
     payload: AnalyzeReq,
     request: Request,
     sync: bool = Query(True, description="Synchronous execution toggle"),
-    debug: bool = Query(False, description="Emit pre/post-upsert diagnostics"),
+    debug: bool | int | str = Query(
+        False,
+        description="Emit pre/post-upsert diagnostics (truthy values: 1,true,on,yes)",
+    ),
     llm: LLMRunner = Depends(get_llm),
     vlm: VLMRunner = Depends(_get_vlm),
-) -> Dict[str, Any]:
+) -> AnalyzeResp:
     if not sync:
         raise HTTPException(status_code=400, detail="async execution is not supported")
 
     await _ensure_dependencies(request)
+
+    debug_enabled = _is_truthy(debug)
 
     timings: Dict[str, int] = {
         "vlm_ms": 0,
@@ -158,6 +178,7 @@ async def analyze(
     current_stage = "init"
     graph_repo: Optional[GraphRepo] = None
     context_builder: Optional[GraphContextBuilder] = None
+    debug_blob: Dict[str, Any] = {"stage": "init"}
 
     try:
         current_stage = "image_load"
@@ -165,6 +186,8 @@ async def analyze(
             image_bytes, image_path = _read_image_bytes(payload)
         except HTTPException:
             raise
+        if debug_enabled:
+            debug_blob["stage"] = current_stage
 
         temp_file: Optional[str] = None
         image_path_for_vlm = image_path
@@ -182,6 +205,8 @@ async def analyze(
                 image_id=payload.image_id,
                 vlm_runner=vlm,
             )
+        if debug_enabled:
+            debug_blob["stage"] = current_stage
 
         if temp_file:
             try:
@@ -217,8 +242,7 @@ async def analyze(
         normalized_findings = dedup_findings(list(normalized.get("findings") or []))
         normalized["findings"] = normalized_findings
 
-        debug_blob: Dict[str, Any] = {}
-        if debug:
+        if debug_enabled:
             debug_blob.update({
                 "stage": "pre_upsert",
                 "normalized_image": {
@@ -243,14 +267,15 @@ async def analyze(
             "idempotency_key": payload.idempotency_key,
         }
         with timeit(timings, "upsert_ms"):
-            upsert_receipt = graph_repo.upsert_case(graph_payload)
-        finding_ids = upsert_receipt.get("finding_ids") or []
+            upsert_receipt_raw = graph_repo.upsert_case(graph_payload)
+        upsert_receipt = dict(upsert_receipt_raw or {})
+        finding_ids = list(upsert_receipt.get("finding_ids") or [])
 
-        if debug:
+        if debug_enabled:
             debug_blob.update({
                 "stage": "post_upsert",
                 "upsert_receipt": upsert_receipt,
-                "post_upsert_finding_ids": (upsert_receipt or {}).get("finding_ids", [])[:5],
+                "post_upsert_finding_ids": finding_ids,
             })
 
         persisted_f_cnt = 0
@@ -281,15 +306,17 @@ async def analyze(
 
         except Exception:
             pass
-        
-        if debug:
+
+        if debug_enabled:
+            findings_list = (facts.get("findings") or []) if isinstance(facts, dict) else []
+            paths_list = paths if isinstance(paths, list) else []
             debug_blob.update({
                 "stage": "context",
                 "context_summary": context_bundle.get("summary"),
-                "context_findings_len": len((facts.get("findings") or []) if isinstance(facts, dict) else []),
-                "context_findings_head": (facts.get("findings") or [])[:2] if isinstance(facts, dict) else [],
-                "context_paths_len": len(paths) if isinstance(paths, list) else 0,
-                "context_paths_head": paths[:2] if isinstance(paths, list) else [],
+                "context_findings_len": len(findings_list),
+                "context_findings_head": findings_list[:2],
+                "context_paths_len": len(paths_list),
+                "context_paths_head": paths_list[:2],
             })
 
         results: Dict[str, Dict[str, Any]] = {}
@@ -359,6 +386,23 @@ async def analyze(
                     timings["llm_vgl_ms"] = 0
                     results["VGL"] = {"text": "Graph findings unavailable", "latency_ms": 0, "degraded": False}
 
+        if debug_enabled:
+            debug_blob.setdefault("normalized_image", {
+                "image_id": normalized_image.get("image_id"),
+                "path": normalized_image.get("path"),
+                "modality": normalized_image.get("modality"),
+            })
+            debug_blob.setdefault("pre_upsert_findings_len", len(normalized_findings))
+            debug_blob.setdefault("pre_upsert_findings_head", normalized_findings[:2])
+            debug_blob.setdefault("pre_upsert_report_conf", normalized_report.get("conf"))
+            debug_blob.setdefault("upsert_receipt", upsert_receipt)
+            debug_blob.setdefault("post_upsert_finding_ids", finding_ids)
+            debug_blob.setdefault("context_summary", context_bundle.get("summary"))
+            debug_blob.setdefault("context_findings_len", len((facts.get("findings") or []) if isinstance(facts, dict) else []))
+            debug_blob.setdefault("context_findings_head", (facts.get("findings") or [])[:2] if isinstance(facts, dict) else [])
+            debug_blob.setdefault("context_paths_len", len(paths if isinstance(paths, list) else []))
+            debug_blob.setdefault("context_paths_head", (paths if isinstance(paths, list) else [])[:2])
+
         response = {
             "ok": True,
             "case_id": case_id,
@@ -367,10 +411,10 @@ async def analyze(
             "results": results,
             "timings": timings,
             "errors": errors,
+            "debug": debug_blob if debug_enabled else {},
         }
-        if debug:
-            response["debug"] = debug_blob
-        return response
+
+        return AnalyzeResp(**response)
 
     except HTTPException:
         raise
