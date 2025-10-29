@@ -134,7 +134,7 @@ async def _persist_inference(
         "timestamp": timestamp,
         "source_type": source_type,
         "source_reference": source_reference,
-        "version": ontology_version,
+        "version_id": ontology_version,
     }
     edge_properties = {"at": timestamp, "role": image_role}
 

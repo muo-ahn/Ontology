@@ -8,6 +8,7 @@ import os
 import re
 import time
 from contextlib import contextmanager
+from itertools import combinations
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,9 @@ from services.vlm_runner import VLMRunner
 from .llm import LLMInputError, get_llm, run_v_mode, run_vgl_mode, run_vl_mode
 
 GRAPH_TRIPLE_CHAR_CAP = 1800
+CONSENSUS_AGREEMENT_THRESHOLD = 0.6
+CONSENSUS_HIGH_CONFIDENCE_THRESHOLD = 0.8
+CONSENSUS_MODE_PRIORITY = ("VGL", "VL", "V")
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -65,6 +69,114 @@ def clamp_one_line(text: str, max_chars: int) -> str:
 
     cleaned = " ".join(text.split())
     return cleaned[:max_chars]
+
+
+def _normalise_for_consensus(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _jaccard_similarity(a: str, b: str) -> float:
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+def _preferred_mode(modes: List[str]) -> Optional[str]:
+    for mode in CONSENSUS_MODE_PRIORITY:
+        if mode in modes:
+            return mode
+    return modes[0] if modes else None
+
+
+def _build_consensus(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    available: Dict[str, Dict[str, Any]] = {}
+    for mode, payload in results.items():
+        if not isinstance(payload, dict):
+            continue
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            available[mode] = {
+                "text": text,
+                "normalised": _normalise_for_consensus(text),
+                "latency_ms": payload.get("latency_ms"),
+                "degraded": payload.get("degraded"),
+            }
+
+    total_modes = len(available)
+    if total_modes == 0:
+        return {
+            "text": "",
+            "status": "empty",
+            "supporting_modes": [],
+            "disagreed_modes": [],
+            "agreement_score": 0.0,
+            "confidence": "low",
+        }
+
+    if total_modes == 1:
+        sole_mode = next(iter(available.keys()))
+        data = available[sole_mode]
+        return {
+            "text": data["text"],
+            "status": "single",
+            "supporting_modes": [sole_mode],
+            "disagreed_modes": [],
+            "agreement_score": 1.0,
+            "confidence": "medium",
+        }
+
+    best_pair: Optional[tuple[str, str]] = None
+    best_score = -1.0
+    for (mode_a, data_a), (mode_b, data_b) in combinations(available.items(), 2):
+        score = _jaccard_similarity(data_a["normalised"], data_b["normalised"])
+        if score > best_score:
+            best_score = score
+            best_pair = (mode_a, mode_b)
+
+    agreement_score = max(best_score, 0.0)
+    supporting_modes: List[str] = []
+    if best_pair and agreement_score >= CONSENSUS_AGREEMENT_THRESHOLD:
+        supporting_modes = sorted(best_pair, key=lambda mode: CONSENSUS_MODE_PRIORITY.index(mode) if mode in CONSENSUS_MODE_PRIORITY else len(CONSENSUS_MODE_PRIORITY))
+
+    disagreed_modes = sorted(set(available.keys()) - set(supporting_modes))
+
+    notes: Optional[str] = None
+    if supporting_modes:
+        preferred = _preferred_mode(supporting_modes) or supporting_modes[0]
+        consensus_text = available[preferred]["text"]
+        confidence = "high" if agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD else "medium"
+        status = "agree"
+        notes = "agreement across requested modes"
+    else:
+        preferred = _preferred_mode(list(available.keys())) or next(iter(available.keys()))
+        consensus_text = available[preferred]["text"]
+        confidence = "low"
+        status = "disagree"
+        supporting_modes = [preferred] if preferred else []
+        notes = "outputs diverged across modes"
+
+    degraded_inputs = sorted(mode for mode, data in available.items() if data.get("degraded"))
+    presented_text = consensus_text if status != "disagree" else f"낮은 확신: {consensus_text}"
+
+    consensus_payload: Dict[str, Any] = {
+        "text": consensus_text,
+        "presented_text": presented_text,
+        "status": status,
+        "supporting_modes": supporting_modes,
+        "disagreed_modes": disagreed_modes,
+        "agreement_score": round(agreement_score, 3),
+        "confidence": confidence,
+    }
+    if degraded_inputs:
+        consensus_payload["degraded_inputs"] = degraded_inputs
+    consensus_payload["evaluated_modes"] = sorted(available.keys())
+    if notes:
+        consensus_payload["notes"] = notes
+    return consensus_payload
 
 
 @contextmanager
@@ -402,6 +514,11 @@ async def analyze(
             debug_blob.setdefault("context_findings_head", (facts.get("findings") or [])[:2] if isinstance(facts, dict) else [])
             debug_blob.setdefault("context_paths_len", len(paths if isinstance(paths, list) else []))
             debug_blob.setdefault("context_paths_head", (paths if isinstance(paths, list) else [])[:2])
+
+        consensus = _build_consensus(results)
+        results["consensus"] = consensus
+        if debug_enabled:
+            debug_blob["consensus"] = consensus
 
         response = {
             "ok": True,
