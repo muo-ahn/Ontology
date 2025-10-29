@@ -7,7 +7,7 @@ CREATE CONSTRAINT IF NOT EXISTS FOR (o:Observation) REQUIRE o.observation_id IS 
 CREATE CONSTRAINT IF NOT EXISTS FOR (d:Diagnosis) REQUIRE d.diagnosis_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (pr:Procedure) REQUIRE pr.procedure_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (m:Medication) REQUIRE m.med_id IS UNIQUE;
-CREATE CONSTRAINT IF NOT EXISTS FOR (img:Image) REQUIRE img.id IS UNIQUE;
+CREATE CONSTRAINT IF NOT EXISTS FOR (img:Image) REQUIRE img.image_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (ai:AIInference) REQUIRE ai.inference_id IS UNIQUE;
 CREATE CONSTRAINT IF NOT EXISTS FOR (ov:OntologyVersion) REQUIRE ov.version_id IS UNIQUE;
 
@@ -63,7 +63,7 @@ MERGE (enc)-[:HAS_OBSERVATION]->(obs);
 // Imaging
 WITH [
   {image_id:'IMG_001', encounter_id:'E0003', modality:'XR', captured_at:'2025-06-30T10:10:00', storage_uri:'/mnt/data/medical_dummy/images/img_001.png', caption_hint:'Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.'},
-  {image_id:'IMG_002', encounter_id:'E0006', modality:'ECG', captured_at:'2025-07-06T09:45:00', storage_uri:'/mnt/data/medical_dummy/images/img_002.png', caption_hint:'Abdominal ultrasound – fatty liver pattern. No gallstones visualized.'},
+  {image_id:'IMG_002', encounter_id:'E0006', modality:'US', captured_at:'2025-07-06T09:45:00', storage_uri:'/mnt/data/medical_dummy/images/img_002.png', caption_hint:'Abdominal ultrasound – fatty liver pattern. No gallstones visualized.'},
   {image_id:'IMG_003', encounter_id:'E0005', modality:'ECG', captured_at:'2025-06-24T11:35:00', storage_uri:'/mnt/data/medical_dummy/images/img_003.png', caption_hint:'ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.'}
 ] AS rows
 UNWIND rows AS r
@@ -126,7 +126,7 @@ SET ai += {
   timestamp:r.timestamp,
   source_type:r.source_type,
   source_reference:r.source_reference,
-  version:'1.1'
+  version_id:'1.1'
 }
 MERGE (img)-[:HAS_INFERENCE {role:r.role}]->(ai)
 MERGE (enc)-[:HAS_INFERENCE {role:'llm'}]->(ai)

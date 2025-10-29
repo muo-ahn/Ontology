@@ -27,7 +27,7 @@ DEFAULT_PASSWORD = os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PASSWORD", "test1
 
 @dataclass
 class IssueSummary:
-    non_string_version: int = 0
+    non_string_version_id: int = 0
     missing_version_link: int = 0
     missing_image_link: int = 0
     missing_encounter_link: int = 0
@@ -35,7 +35,7 @@ class IssueSummary:
 
     def __str__(self) -> str:
         rows = [
-            ("AIInference.version not string", self.non_string_version),
+            ("AIInference.version_id not string", self.non_string_version_id),
             ("AIInference missing RECORDED_WITH", self.missing_version_link),
             ("AIInference missing image link", self.missing_image_link),
             ("AIInference missing encounter link", self.missing_encounter_link),
@@ -57,23 +57,27 @@ def collect_ids(session, query: str, **parameters) -> List[str]:
 def check_and_fix(driver, *, ontology_version: str, fix: bool) -> IssueSummary:
     summary = IssueSummary()
     with driver.session() as session:
-        rows = session.run(
+        rows = list(
+            session.run(
             """
             MATCH (ai:AIInference)
-            WHERE ai.version IS NOT NULL
-            RETURN ai.inference_id AS id, ai.version AS version
+            WITH ai, coalesce(ai.version_id, ai.version) AS version
+            WHERE version IS NOT NULL
+            RETURN ai.inference_id AS id, version AS version
             """
         )
+        )
         non_string = [row for row in rows if not isinstance(row["version"], str)]
-        summary.non_string_version = len(non_string)
-        if fix and non_string:
+        summary.non_string_version_id = len(non_string)
+        if fix and rows:
             session.run(
                 """
                 UNWIND $rows AS row
                 MATCH (ai:AIInference {inference_id: row.id})
-                SET ai.version = toString(row.version)
+                SET ai.version_id = toString(row.version)
+                REMOVE ai.version
                 """,
-                rows=[{"id": row["id"], "version": row["version"]} for row in non_string],
+                rows=[{"id": row["id"], "version": row["version"]} for row in rows],
             )
 
         missing_version_rel = collect_ids(

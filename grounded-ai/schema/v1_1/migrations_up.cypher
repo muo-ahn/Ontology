@@ -7,10 +7,11 @@ ON CREATE SET
   v.description = 'GraphDB modeling revamp (procedures, provenance, versioning)';
 ;
 
-// 2. Ensure AIInference nodes capture version metadata
+// 2. Ensure AIInference nodes capture version metadata with consistent naming
 MATCH (inference:AIInference)
-WHERE inference.version IS NULL
-SET inference.version = '1.1';
+WITH inference, coalesce(inference.version_id, inference.version) AS existing_version
+SET inference.version_id = toString(coalesce(existing_version, '1.1'))
+REMOVE inference.version;
 
 // 3. Link AIInference nodes to OntologyVersion for provenance
 MATCH (inference:AIInference)

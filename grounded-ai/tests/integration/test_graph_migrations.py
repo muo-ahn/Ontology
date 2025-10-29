@@ -82,7 +82,7 @@ def test_migration_and_seed_apply_successfully(neo4j_driver, clean_database):
         missing_versions = session.run(
             """
             MATCH (ai:AIInference)
-            WHERE ai.version IS NULL
+            WHERE ai.version_id IS NULL
             RETURN count(ai) AS cnt
             """
         ).single()["cnt"]
