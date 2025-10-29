@@ -32,8 +32,6 @@ PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
 PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
-// graph_repo.py 내부 upsert 전용 Cypher를 '정확히' 이렇게 교체
-
 MERGE (i:Image {image_id: $image.image_id})
 SET  i.path = $image.path,
      i.modality = $image.modality
@@ -125,18 +123,90 @@ RETURN {
 """
 
 TOPK_PATHS_QUERY = """
-MATCH (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
-OPTIONAL MATCH (f)-[r1:LOCATED_IN]->(a:Anatomy)
-OPTIONAL MATCH (i)-[r2:DESCRIBED_BY]->(rep:Report)
-WITH i,f,a, r1,rep, r2,
-     coalesce(f.conf,0.5) AS f_conf,
-     coalesce(r1.conf,0.5) AS loc_conf,
-     coalesce(r2.conf,0.5) AS rep_conf,
-     coalesce(f.ts, datetime("1970-01-01")) AS f_ts
-WITH i,f,a,rep,(0.6*f_conf+0.3*loc_conf+0.1*rep_conf) AS score, f_ts
-ORDER BY score DESC, f_ts DESC
-WITH i, collect({f:f{.*}, a:a{.*}, rep:rep{.*}, score:score})[0..$k] AS hits
-RETURN hits
+MATCH p = (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
+OPTIONAL MATCH (f)-[loc_rel:LOCATED_IN]->(a:Anatomy)
+OPTIONAL MATCH (i)-[desc_rel:DESCRIBED_BY]->(rep:Report)
+WITH p,
+     i,
+     f,
+     a,
+     rep,
+     coalesce(f.conf, 0.5) AS finding_conf,
+     CASE WHEN loc_rel IS NULL THEN 0.0 ELSE coalesce(loc_rel.conf, 0.5) END AS loc_conf,
+     CASE WHEN desc_rel IS NULL THEN 0.0 ELSE coalesce(desc_rel.conf, 0.5) END AS report_conf,
+     coalesce(f.ts, datetime("1970-01-01")) AS finding_ts,
+     toFloat(coalesce($alpha_finding, 0.6)) AS alpha,
+     toFloat(coalesce($beta_report, 0.4)) AS beta
+WITH p,
+     i,
+     f,
+     a,
+     rep,
+     finding_ts,
+     finding_conf,
+     loc_conf,
+     report_conf,
+     alpha,
+     beta,
+     CASE
+         WHEN alpha + beta >= 1.0 THEN 0.0
+         ELSE 1.0 - alpha - beta
+     END AS gamma
+WITH p,
+     i,
+     f,
+     a,
+     rep,
+     finding_ts,
+     round(alpha * finding_conf + gamma * loc_conf + beta * report_conf, 4) AS score
+ORDER BY score DESC, finding_ts DESC
+WITH collect({
+  path: p,
+  image_id: i.image_id,
+  finding: f,
+  anatomy: a,
+  report: rep,
+  score: score
+})[0..$k] AS top_hits
+WITH [hit IN top_hits |
+  {
+    label: CASE
+              WHEN hit.anatomy IS NULL THEN coalesce(hit.finding.type, 'Finding')
+              ELSE coalesce(hit.finding.type, 'Finding') + ' @ ' +
+                   coalesce(hit.anatomy.name, hit.anatomy.id, 'Unknown anatomy')
+           END,
+    triples:
+      [rel IN relationships(hit.path) |
+         head(labels(startNode(rel))) + '[' +
+         coalesce(
+             startNode(rel).image_id,
+             startNode(rel).id,
+             startNode(rel).name,
+             toString(id(startNode(rel)))
+         ) + '] -' + type(rel) + '-> ' +
+         head(labels(endNode(rel))) + '[' +
+         coalesce(
+             endNode(rel).image_id,
+             endNode(rel).id,
+             endNode(rel).name,
+             toString(id(endNode(rel)))
+         ) + ']'
+      ] +
+      CASE
+        WHEN hit.report IS NULL THEN []
+        ELSE [
+          'Image[' + coalesce(hit.image_id, 'UNKNOWN') + '] -DESCRIBED_BY-> Report[' +
+          coalesce(hit.report.id, hit.report.model, 'UNKNOWN') + ']'
+        ]
+      END,
+    score: hit.score
+  }
+] AS paths
+RETURN [p IN paths | {
+  label: CASE WHEN trim(p.label) = '' THEN 'Finding path' ELSE trim(p.label) END,
+  triples: p.triples,
+  score: p.score
+}] AS paths
 """
 
 class GraphRepo:
