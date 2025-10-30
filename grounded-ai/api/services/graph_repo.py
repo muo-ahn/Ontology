@@ -123,90 +123,58 @@ RETURN {
 """
 
 TOPK_PATHS_QUERY = """
-MATCH p = (i:Image {image_id:$image_id})-[:HAS_FINDING]->(f:Finding)
-OPTIONAL MATCH (f)-[loc_rel:LOCATED_IN]->(a:Anatomy)
-OPTIONAL MATCH (i)-[desc_rel:DESCRIBED_BY]->(rep:Report)
-WITH p,
-     i,
-     f,
-     a,
-     rep,
-     coalesce(f.conf, 0.5) AS finding_conf,
-     CASE WHEN loc_rel IS NULL THEN 0.0 ELSE coalesce(loc_rel.conf, 0.5) END AS loc_conf,
-     CASE WHEN desc_rel IS NULL THEN 0.0 ELSE coalesce(desc_rel.conf, 0.5) END AS report_conf,
-     coalesce(f.ts, datetime("1970-01-01")) AS finding_ts,
-     toFloat(coalesce($alpha_finding, 0.6)) AS alpha,
-     toFloat(coalesce($beta_report, 0.4)) AS beta
-WITH p,
-     i,
-     f,
-     a,
-     rep,
-     finding_ts,
-     finding_conf,
-     loc_conf,
-     report_conf,
-     alpha,
-     beta,
+WITH $image_id AS image_id, $k AS k,
+     toFloat(coalesce($alpha_finding,0.6)) AS A,
+     toFloat(coalesce($beta_report,0.4))   AS B
+
+MATCH (i:Image {image_id:image_id})
+
+// 1) 기본 증거 경로: i -HAS_FINDING-> f -LOCATED_IN-> a, i -DESCRIBED_BY-> r
+OPTIONAL MATCH p1 = (i)-[:HAS_FINDING]->(f:Finding)
+OPTIONAL MATCH p2 = (f)-[:LOCATED_IN]->(a:Anatomy)
+OPTIONAL MATCH p3 = (i)-[:DESCRIBED_BY]->(r:Report)
+
+// 2) 확장 경로: f -RELATED_TO-> f2 (공병/감별진단 등)
+OPTIONAL MATCH p4 = (f)-[rel:RELATED_TO]->(f2:Finding)
+
+// 점수: finding conf 중심 + report conf 보조
+WITH i,f,a,r, f2,
+     coalesce(f.conf,0.5) AS f_conf,
+     coalesce(r.conf,0.5) AS r_conf
+WITH i,f,a,r,f2,
+     (A*f_conf + B*r_conf) AS score
+
+// triples 구성
+WITH i,f,a,r,f2,score,
+     [
+       CASE WHEN f IS NOT NULL THEN 'Image['+i.image_id+'] -HAS_FINDING-> Finding['+f.id+']' END,
+       CASE WHEN a IS NOT NULL THEN 'Finding['+f.id+'] -LOCATED_IN-> Anatomy['+a.code+']' END,
+       CASE WHEN r IS NOT NULL THEN 'Image['+i.image_id+'] -DESCRIBED_BY-> Report['+r.id+']' END,
+       CASE WHEN f2 IS NOT NULL THEN 'Finding['+f.id+'] -RELATED_TO-> Finding['+f2.id+']' END
+     ] AS trip_raw
+
+WITH i, score,
+     [t IN trip_raw WHERE t IS NOT NULL] AS triples
+
+// 라벨은 대표 finding type/location
+WITH i, score, triples,
      CASE
-         WHEN alpha + beta >= 1.0 THEN 0.0
-         ELSE 1.0 - alpha - beta
-     END AS gamma
-WITH p,
-     i,
-     f,
-     a,
-     rep,
-     finding_ts,
-     round(alpha * finding_conf + gamma * loc_conf + beta * report_conf, 4) AS score
-ORDER BY score DESC, finding_ts DESC
-WITH collect({
-  path: p,
-  image_id: i.image_id,
-  finding: f,
-  anatomy: a,
-  report: rep,
-  score: score
-})[0..$k] AS top_hits
-WITH [hit IN top_hits |
-  {
-    label: CASE
-              WHEN hit.anatomy IS NULL THEN coalesce(hit.finding.type, 'Finding')
-              ELSE coalesce(hit.finding.type, 'Finding') + ' @ ' +
-                   coalesce(hit.anatomy.name, hit.anatomy.id, 'Unknown anatomy')
-           END,
-    triples:
-      [rel IN relationships(hit.path) |
-         head(labels(startNode(rel))) + '[' +
-         coalesce(
-             startNode(rel).image_id,
-             startNode(rel).id,
-             startNode(rel).name,
-             toString(id(startNode(rel)))
-         ) + '] -' + type(rel) + '-> ' +
-         head(labels(endNode(rel))) + '[' +
-         coalesce(
-             endNode(rel).image_id,
-             endNode(rel).id,
-             endNode(rel).name,
-             toString(id(endNode(rel)))
-         ) + ']'
-      ] +
-      CASE
-        WHEN hit.report IS NULL THEN []
-        ELSE [
-          'Image[' + coalesce(hit.image_id, 'UNKNOWN') + '] -DESCRIBED_BY-> Report[' +
-          coalesce(hit.report.id, hit.report.model, 'UNKNOWN') + ']'
-        ]
-      END,
-    score: hit.score
-  }
-] AS paths
-RETURN [p IN paths | {
-  label: CASE WHEN trim(p.label) = '' THEN 'Finding path' ELSE trim(p.label) END,
-  triples: p.triples,
-  score: p.score
-}] AS paths
+       WHEN size(triples)=0 THEN 'NoPath'
+       ELSE
+         coalesce(f.type, 'Finding')
+     END AS label
+
+WITH { label: label, score: score, triples: triples } AS path
+WITH collect(path) AS all
+// 점수 내림차순 + 고유화
+UNWIND all AS p
+WITH p.label AS label,
+     p.triples AS triples,
+     p.score AS score
+WITH label, triples, score
+ORDER BY score DESC
+WITH collect({label:label, triples:triples, score:score}) AS ranked
+RETURN ranked[0..$k] AS paths;
 """
 
 class GraphRepo:
