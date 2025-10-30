@@ -1,9 +1,10 @@
 """One-shot orchestration endpoint that chains vLM → graph → LLM."""
 
 from __future__ import annotations
-
+modality: Optional[str] = None,
 import base64
 import binascii
+import logging
 import os
 import re
 import time
@@ -26,7 +27,14 @@ from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
 from services.vlm_runner import VLMRunner
 
-from .llm import LLMInputError, get_llm, run_v_mode, run_vgl_mode, run_vl_mode
+from .llm import (
+    LLMInputError,
+    get_llm,
+    modality_penalty,
+    run_v_mode,
+    run_vgl_mode,
+    run_vl_mode,
+)
 
 GRAPH_TRIPLE_CHAR_CAP = 1800
 CONSENSUS_AGREEMENT_THRESHOLD = 0.6
@@ -34,6 +42,8 @@ CONSENSUS_HIGH_CONFIDENCE_THRESHOLD = 0.8
 CONSENSUS_MODE_PRIORITY = ("VGL", "VL", "V")
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
+
+logger = logging.getLogger(__name__)
 
 
 class AnalyzeReq(BaseModel):
@@ -92,18 +102,27 @@ def _preferred_mode(modes: List[str]) -> Optional[str]:
     return modes[0] if modes else None
 
 
-def _build_consensus(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def compute_consensus(
+    results: Dict[str, Dict[str, Any]],
+    modality: Optional[str] = None,
+    weights: Optional[Dict[str, float]] = None,
+    min_agree: Optional[float] = None,
+) -> Dict[str, Any]:
     available: Dict[str, Dict[str, Any]] = {}
+    weight_map = {k: float(v) for k, v in (weights or {}).items()}
+    fallback_threshold = min_agree if min_agree is not None else CONSENSUS_AGREEMENT_THRESHOLD
     for mode, payload in results.items():
         if not isinstance(payload, dict):
             continue
         text = payload.get("text")
         if isinstance(text, str) and text.strip():
+            penalty = modality_penalty(text, modality)
             available[mode] = {
                 "text": text,
                 "normalised": _normalise_for_consensus(text),
                 "latency_ms": payload.get("latency_ms"),
                 "degraded": payload.get("degraded"),
+                "penalty": penalty,
             }
 
     total_modes = len(available)
@@ -130,17 +149,42 @@ def _build_consensus(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         }
 
     best_pair: Optional[tuple[str, str]] = None
-    best_score = -1.0
+    best_pair_weight = 1.0
+    best_weighted_score = -1.0
+    best_raw_score = 0.0
     for (mode_a, data_a), (mode_b, data_b) in combinations(available.items(), 2):
         score = _jaccard_similarity(data_a["normalised"], data_b["normalised"])
-        if score > best_score:
-            best_score = score
+        pair_weight = (weight_map.get(mode_a, 1.0) + weight_map.get(mode_b, 1.0)) / 2.0
+        weighted_score = score * pair_weight
+        if weighted_score > best_weighted_score:
+            best_weighted_score = weighted_score
             best_pair = (mode_a, mode_b)
+            best_raw_score = score
+            best_pair_weight = pair_weight
 
-    agreement_score = max(best_score, 0.0)
+    agreement_score = max(best_raw_score, 0.0)
     supporting_modes: List[str] = []
-    if best_pair and agreement_score >= CONSENSUS_AGREEMENT_THRESHOLD:
-        supporting_modes = sorted(best_pair, key=lambda mode: CONSENSUS_MODE_PRIORITY.index(mode) if mode in CONSENSUS_MODE_PRIORITY else len(CONSENSUS_MODE_PRIORITY))
+    fallback_used = False
+    if best_pair:
+        effective_threshold = CONSENSUS_AGREEMENT_THRESHOLD
+        if agreement_score >= effective_threshold:
+            supporting_modes = sorted(
+                best_pair,
+                key=lambda mode: CONSENSUS_MODE_PRIORITY.index(mode)
+                if mode in CONSENSUS_MODE_PRIORITY
+                else len(CONSENSUS_MODE_PRIORITY),
+            )
+        elif (
+            agreement_score >= fallback_threshold
+            and best_pair_weight > 1.0
+        ):
+            supporting_modes = sorted(
+                best_pair,
+                key=lambda mode: CONSENSUS_MODE_PRIORITY.index(mode)
+                if mode in CONSENSUS_MODE_PRIORITY
+                else len(CONSENSUS_MODE_PRIORITY),
+            )
+            fallback_used = True
 
     disagreed_modes = sorted(set(available.keys()) - set(supporting_modes))
 
@@ -148,9 +192,17 @@ def _build_consensus(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     if supporting_modes:
         preferred = _preferred_mode(supporting_modes) or supporting_modes[0]
         consensus_text = available[preferred]["text"]
-        confidence = "high" if agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD else "medium"
+        if agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD:
+            confidence = "high"
+        elif fallback_used:
+            confidence = "medium"
+        else:
+            confidence = "medium"
         status = "agree"
-        notes = "agreement across requested modes"
+        if fallback_used:
+            notes = "weighted agreement favouring grounded evidence"
+        else:
+            notes = "agreement across requested modes"
     else:
         preferred = _preferred_mode(list(available.keys())) or next(iter(available.keys()))
         consensus_text = available[preferred]["text"]
@@ -210,6 +262,16 @@ def _slugify(value: str) -> str:
     if not cleaned:
         cleaned = uuid4().hex[:12]
     return cleaned[:48]
+
+
+def _derive_image_id_from_path(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    stem = Path(path).stem
+    alnum = re.sub(r"[^A-Za-z0-9]+", "", stem)
+    if not alnum:
+        return None
+    return alnum.upper()[:48]
 
 
 def _resolve_case_id(payload: AnalyzeReq, image_path: Optional[str], image_id: str) -> str:
@@ -328,10 +390,27 @@ async def analyze(
 
         normalized_image = dict(normalized.get("image") or {})
         normalized_image_id = normalized_image.get("image_id")
+        image_id_source = "normalizer"
+        resolved_path = payload.file_path or image_path
         if payload.image_id:
             normalized_image_id = payload.image_id
+            image_id_source = "payload"
+        else:
+            derived_from_path = _derive_image_id_from_path(resolved_path)
+            if derived_from_path:
+                normalized_image_id = derived_from_path
+                image_id_source = "file_path"
         if not normalized_image_id:
             raise HTTPException(status_code=502, detail="unable to derive image identifier")
+
+        logger.info(
+            "pipeline.normalize.image_id",
+            extra={
+                "image_id": normalized_image_id,
+                "image_id_source": image_id_source,
+                "image_path": resolved_path,
+            },
+        )
 
         image_id = normalized_image_id
         case_id = _resolve_case_id(payload, image_path, image_id)
@@ -369,6 +448,15 @@ async def analyze(
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
+
+        logger.info(
+            "pipeline.diag.pre_graph",
+            extra={
+                "case_id": case_id,
+                "image_id": image_id,
+                "modality": normalized_image.get("modality"),
+            },
+        )
 
         current_stage = "upsert"
         graph_payload = {
@@ -515,7 +603,12 @@ async def analyze(
             debug_blob.setdefault("context_paths_len", len(paths if isinstance(paths, list) else []))
             debug_blob.setdefault("context_paths_head", (paths if isinstance(paths, list) else [])[:2])
 
-        consensus = _build_consensus(results)
+        has_paths = (debug_blob.get("context_paths_len", 0) or 0) > 0
+        weights = {"V": 1.0, "VL": 1.2, "VGL": 1.0}
+        if has_paths:
+            weights["VGL"] = 1.8
+
+        consensus = compute_consensus(results, weights=weights, min_agree=0.35)
         results["consensus"] = consensus
 
         # --- Post-consensus safety filter ---

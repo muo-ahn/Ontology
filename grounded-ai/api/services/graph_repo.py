@@ -126,52 +126,27 @@ TOPK_PATHS_QUERY = """
 WITH $image_id AS image_id, $k AS k,
      toFloat(coalesce($alpha_finding,0.6)) AS A,
      toFloat(coalesce($beta_report,0.4))   AS B
-
 MATCH (i:Image {image_id:image_id})
-
-// 1) 기본 증거 경로: i -HAS_FINDING-> f -LOCATED_IN-> a, i -DESCRIBED_BY-> r
-OPTIONAL MATCH p1 = (i)-[:HAS_FINDING]->(f:Finding)
-OPTIONAL MATCH p2 = (f)-[:LOCATED_IN]->(a:Anatomy)
-OPTIONAL MATCH p3 = (i)-[:DESCRIBED_BY]->(r:Report)
-
-// 2) 확장 경로: f -RELATED_TO-> f2 (공병/감별진단 등)
-OPTIONAL MATCH p4 = (f)-[rel:RELATED_TO]->(f2:Finding)
-
-// 점수: finding conf 중심 + report conf 보조
-WITH i,f,a,r, f2, A, B,
+OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
+OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
+OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(r:Report)
+OPTIONAL MATCH (f)-[:RELATED_TO]->(f2:Finding)
+WITH i,f,a,r,f2,A,B,
      coalesce(f.conf,0.5) AS f_conf,
      coalesce(r.conf,0.5) AS r_conf
-WITH i,f,a,r,f2,A,B,
-     (A*f_conf + B*r_conf) AS score
-
-// triples 구성
-WITH i,f,a,r,f2,score,
+WITH i,f,a,r,f2,(A*f_conf + B*r_conf) AS score,
      [
        CASE WHEN f IS NOT NULL THEN 'Image['+i.image_id+'] -HAS_FINDING-> Finding['+f.id+']' END,
        CASE WHEN a IS NOT NULL THEN 'Finding['+f.id+'] -LOCATED_IN-> Anatomy['+a.code+']' END,
        CASE WHEN r IS NOT NULL THEN 'Image['+i.image_id+'] -DESCRIBED_BY-> Report['+r.id+']' END,
        CASE WHEN f2 IS NOT NULL THEN 'Finding['+f.id+'] -RELATED_TO-> Finding['+f2.id+']' END
      ] AS trip_raw
-
-WITH i, f, score,
-     [t IN trip_raw WHERE t IS NOT NULL] AS triples
-
-// 라벨은 대표 finding type/location
-WITH i, f, score, triples,
-     CASE
-       WHEN size(triples)=0 THEN 'NoPath'
-       ELSE
-         coalesce(f.type, 'Finding')
-     END AS label
-
-WITH { label: label, score: score, triples: triples } AS path
+WITH {label: coalesce(f.type,'Finding'),
+      score: score,
+      triples: [t IN trip_raw WHERE t IS NOT NULL]} AS path
 WITH collect(path) AS all
-// 점수 내림차순 + 고유화
 UNWIND all AS p
-WITH p.label AS label,
-     p.triples AS triples,
-     p.score AS score
-WITH label, triples, score
+WITH p.label AS label, p.triples AS triples, p.score AS score
 ORDER BY score DESC
 WITH collect({label:label, triples:triples, score:score}) AS ranked
 RETURN ranked[0..$k] AS paths;
@@ -312,8 +287,7 @@ class GraphRepo:
         records = self._run_read(TOPK_PATHS_QUERY, params)
         if not records:
             return []
-        paths = records[0].get("paths") if isinstance(records[0], dict) else None
-        return list(paths or [])
+        return list(records[0]["paths"] or [])
 
 
 __all__ = ["GraphRepo"]

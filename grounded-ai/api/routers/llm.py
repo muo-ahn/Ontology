@@ -72,6 +72,27 @@ VGL_TEMPLATE = """[GRAPH CONTEXT]
 이 영상을 한국어 한 줄로 요약하라.
 """
 
+BANNED_BY_MODALITY: Dict[str, tuple[str, ...]] = {
+    "US": ("gestational", "fetal", "uterus", "ecg"),
+    "CT": ("fetal", "uterus", "ecg"),
+}
+
+
+def modality_penalty(text: str, modality: Optional[str]) -> float:
+    """Return a negative penalty if the text conflicts with the study modality."""
+
+    if not modality:
+        return 0.0
+
+    banned_terms = BANNED_BY_MODALITY.get(modality.upper(), ())
+    if not banned_terms:
+        return 0.0
+
+    lowered = (text or "").lower()
+    if any(term in lowered for term in banned_terms):
+        return -0.2
+    return 0.0
+
 
 def get_llm(request: Request) -> LLMRunner:
     runner: LLMRunner | None = getattr(request.app.state, "llm", None)
@@ -325,4 +346,5 @@ __all__ = [
     "run_vl_mode",
     "run_vgl_mode",
     "LLMInputError",
+    "modality_penalty",
 ]
