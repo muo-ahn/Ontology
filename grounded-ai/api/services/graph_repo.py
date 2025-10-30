@@ -32,10 +32,18 @@ PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
 PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
-MERGE (i:Image {image_id: $image.image_id})
-SET  i.path = $image.path,
-     i.modality = $image.modality,
-     i.storage_uri = coalesce($image.storage_uri, i.storage_uri)
+MATCH (i:Image {storage_uri: $image.storage_uri})
+WITH i, $image AS img
+CALL apoc.do.when(
+  i IS NOT NULL,
+  'WITH i RETURN i AS image',
+  'MERGE (j:Image {image_id: img.image_id}) SET j.storage_uri = img.storage_uri, j.modality = img.modality RETURN j AS image',
+  {i:i, img:img}
+) YIELD value
+WITH value.image AS i, img
+SET  i.path = img.path,
+     i.modality = coalesce(img.modality, i.modality),
+     i.storage_uri = coalesce(img.storage_uri, i.storage_uri)
 
 WITH i, $report AS r
 CALL {

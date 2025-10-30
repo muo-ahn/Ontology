@@ -5,3 +5,5 @@ FOR (r:Report) REQUIRE r.id IS UNIQUE;
 
 CREATE CONSTRAINT finding_id_unique IF NOT EXISTS
 FOR (f:Finding) REQUIRE f.id IS UNIQUE;
+
+CREATE INDEX IF NOT EXISTS FOR (img:Image) ON (img.storage_uri);
