@@ -28,6 +28,7 @@ from services.normalizer import normalize_from_vlm
 from services.vlm_runner import VLMRunner
 
 from .llm import (
+    BANNED_BY_MODALITY,
     LLMInputError,
     get_llm,
     modality_penalty,
@@ -111,18 +112,30 @@ def compute_consensus(
     available: Dict[str, Dict[str, Any]] = {}
     weight_map = {k: float(v) for k, v in (weights or {}).items()}
     fallback_threshold = min_agree if min_agree is not None else CONSENSUS_AGREEMENT_THRESHOLD
+    modality_key = (modality or "").upper()
+    penalised_modes: set[str] = set()
     for mode, payload in results.items():
         if not isinstance(payload, dict):
             continue
         text = payload.get("text")
         if isinstance(text, str) and text.strip():
-            penalty = modality_penalty(text, modality)
+            lowered = text.lower()
+            banned_terms = BANNED_BY_MODALITY.get(modality_key, []) if modality_key else []
+            offending_terms = [term for term in banned_terms if term in lowered]
+            penalty = modality_penalty(text, modality_key)
+            if penalty < 0:
+                penalised_modes.add(mode)
+            base_weight = weight_map.get(mode, 1.0)
+            effective_weight = max(base_weight + penalty, 0.0)
             available[mode] = {
                 "text": text,
                 "normalised": _normalise_for_consensus(text),
                 "latency_ms": payload.get("latency_ms"),
                 "degraded": payload.get("degraded"),
                 "penalty": penalty,
+                "penalty_terms": offending_terms,
+                "effective_weight": effective_weight,
+                "base_weight": base_weight,
             }
 
     total_modes = len(available)
@@ -152,15 +165,25 @@ def compute_consensus(
     best_pair_weight = 1.0
     best_weighted_score = -1.0
     best_raw_score = 0.0
+    best_pair_penalty_modes: tuple[str, ...] = ()
     for (mode_a, data_a), (mode_b, data_b) in combinations(available.items(), 2):
         score = _jaccard_similarity(data_a["normalised"], data_b["normalised"])
-        pair_weight = (weight_map.get(mode_a, 1.0) + weight_map.get(mode_b, 1.0)) / 2.0
-        weighted_score = score * pair_weight
+        weight_a = data_a.get("effective_weight", weight_map.get(mode_a, 1.0))
+        weight_b = data_b.get("effective_weight", weight_map.get(mode_b, 1.0))
+        pair_weight = max(weight_a + weight_b, 0.0) / 2.0
+        penalty_adjustment = (
+            min(data_a.get("penalty", 0.0), 0.0) + min(data_b.get("penalty", 0.0), 0.0)
+        ) / 2.0
+        adjusted_score = max(score + penalty_adjustment, 0.0)
+        weighted_score = adjusted_score * pair_weight
         if weighted_score > best_weighted_score:
             best_weighted_score = weighted_score
             best_pair = (mode_a, mode_b)
-            best_raw_score = score
+            best_raw_score = adjusted_score
             best_pair_weight = pair_weight
+            best_pair_penalty_modes = tuple(
+                sorted({candidate for candidate in (mode_a, mode_b) if available[candidate]["penalty"] < 0})
+            )
 
     agreement_score = max(best_raw_score, 0.0)
     supporting_modes: List[str] = []
@@ -186,6 +209,15 @@ def compute_consensus(
             )
             fallback_used = True
 
+    penalty_note: Optional[str] = None
+    if supporting_modes:
+        conflicted = [mode for mode in supporting_modes if available[mode].get("penalty", 0.0) < 0]
+        if conflicted:
+            penalty_note = "modality conflict: " + ", ".join(sorted(conflicted))
+            supporting_modes = [mode for mode in supporting_modes if available[mode]["penalty"] >= 0]
+    elif best_pair_penalty_modes:
+        penalty_note = "modality conflict: " + ", ".join(best_pair_penalty_modes)
+
     disagreed_modes = sorted(set(available.keys()) - set(supporting_modes))
 
     notes: Optional[str] = None
@@ -210,6 +242,12 @@ def compute_consensus(
         status = "disagree"
         supporting_modes = [preferred] if preferred else []
         notes = "outputs diverged across modes"
+        if available.get(preferred, {}).get("penalty", 0.0) < 0:
+            terms = available.get(preferred, {}).get("penalty_terms", [])
+            detail_terms = ", ".join(sorted(set(terms))) if terms else "unexpected content"
+            penalty_detail = f"penalised terms: {detail_terms}"
+            penalty_note = f"{penalty_note} | {penalty_detail}" if penalty_note else penalty_detail
+            confidence = "very_low"
 
     degraded_inputs = sorted(mode for mode, data in available.items() if data.get("degraded"))
     presented_text = consensus_text if status != "disagree" else f"낮은 확신: {consensus_text}"
@@ -226,8 +264,16 @@ def compute_consensus(
     if degraded_inputs:
         consensus_payload["degraded_inputs"] = degraded_inputs
     consensus_payload["evaluated_modes"] = sorted(available.keys())
+    all_notes: List[str] = []
     if notes:
-        consensus_payload["notes"] = notes
+        all_notes.append(notes)
+    if penalty_note:
+        all_notes.append(penalty_note)
+    if penalised_modes and status != "disagree" and not penalty_note:
+        all_notes.append("penalty applied for modality conflict")
+    if all_notes:
+        consensus_payload["notes"] = " | ".join(all_notes)
+
     return consensus_payload
 
 
@@ -403,23 +449,47 @@ async def analyze(
         if not normalized_image_id:
             raise HTTPException(status_code=502, detail="unable to derive image identifier")
 
+        image_id = normalized_image_id
+        case_id = _resolve_case_id(payload, image_path, image_id)
+        final_image_path = image_path or payload.file_path or normalized_image.get("path")
+        storage_uri_candidate = (
+            normalized_image.get("storage_uri")
+            or payload.file_path
+            or normalized_image.get("path")
+            or resolved_path
+        )
+        storage_uri = str(storage_uri_candidate) if storage_uri_candidate else None
+        if not storage_uri and final_image_path:
+            storage_uri = str(final_image_path)
+        if storage_uri:
+            storage_uri = storage_uri.strip()
+            if not storage_uri:
+                storage_uri = None
+        storage_uri_key = os.path.basename(storage_uri) if storage_uri else None
+        if not storage_uri_key and resolved_path:
+            storage_uri_key = os.path.basename(str(resolved_path))
+        if storage_uri_key:
+            storage_uri_key = storage_uri_key.strip() or None
+
         logger.info(
             "pipeline.normalize.image_id",
             extra={
+                "case_id": case_id,
                 "image_id": normalized_image_id,
                 "image_id_source": image_id_source,
                 "image_path": resolved_path,
+                "storage_uri_key": storage_uri_key,
             },
         )
 
-        image_id = normalized_image_id
-        case_id = _resolve_case_id(payload, image_path, image_id)
-
-        final_image_path = image_path or payload.file_path or normalized_image.get("path")
         normalized_image.update({
             "image_id": image_id,
             "path": final_image_path,
         })
+        if storage_uri:
+            normalized_image["storage_uri"] = storage_uri
+        if storage_uri_key:
+            normalized_image["storage_uri_key"] = storage_uri_key
         normalized["image"] = normalized_image
 
         normalized_report = dict(normalized.get("report") or {})
@@ -455,6 +525,8 @@ async def analyze(
                 "case_id": case_id,
                 "image_id": image_id,
                 "modality": normalized_image.get("modality"),
+                "storage_uri": normalized_image.get("storage_uri"),
+                "storage_uri_key": normalized_image.get("storage_uri_key"),
             },
         )
 
@@ -469,6 +541,11 @@ async def analyze(
         with timeit(timings, "upsert_ms"):
             upsert_receipt_raw = graph_repo.upsert_case(graph_payload)
         upsert_receipt = dict(upsert_receipt_raw or {})
+        resolved_image_id = upsert_receipt.get("image_id")
+        if resolved_image_id:
+            image_id = resolved_image_id
+            normalized_image["image_id"] = resolved_image_id
+            normalized["image"]["image_id"] = resolved_image_id
         finding_ids = list(upsert_receipt.get("finding_ids") or [])
 
         if debug_enabled:
@@ -610,6 +687,7 @@ async def analyze(
 
         consensus = compute_consensus(results, weights=weights, min_agree=0.35)
         results["consensus"] = consensus
+        debug_blob["consensus"] = consensus
 
         # --- Post-consensus safety filter ---
         ORGAN_KEYWORDS = {
@@ -643,9 +721,6 @@ async def analyze(
                 consensus["presented_text"] = (
                     "낮은 확신: 장기 불일치 가능성이 있어 단정이 어렵습니다."
                 )
-
-        if debug_enabled:
-            debug_blob["consensus"] = consensus
 
         response = {
             "ok": True,

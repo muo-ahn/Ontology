@@ -34,7 +34,8 @@ PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 UPSERT_CASE_QUERY = """
 MERGE (i:Image {image_id: $image.image_id})
 SET  i.path = $image.path,
-     i.modality = $image.modality
+     i.modality = $image.modality,
+     i.storage_uri = coalesce($image.storage_uri, i.storage_uri)
 
 WITH i, $report AS r
 CALL {
@@ -122,6 +123,7 @@ RETURN {
 } AS bundle
 """
 
+# Cypher query retrieving weighted top-k explanation paths for a given image.
 TOPK_PATHS_QUERY = """
 WITH $image_id AS image_id, $k AS k,
      toFloat(coalesce($alpha_finding,0.6)) AS A,
@@ -247,13 +249,65 @@ class GraphRepo:
         return data
 
     def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        image_payload = dict(payload.get("image") or {})
         params = {
-            "image": payload["image"],
+            "image": image_payload,
             "report": payload.get("report"),
             "findings": payload.get("findings") or [],
         }
 
         def _tx_fn(tx):
+            image = params["image"]
+            image_id = image.get("image_id")
+            if not image_id:
+                raise ValueError("image.image_id is required")
+            storage_uri_raw = image.get("storage_uri")
+            storage_uri = storage_uri_raw.strip() if isinstance(storage_uri_raw, str) else None
+            storage_uri_key_raw = image.get("storage_uri_key")
+            storage_uri_key = storage_uri_key_raw.strip() if isinstance(storage_uri_key_raw, str) else None
+            if storage_uri:
+                image["storage_uri"] = storage_uri
+            else:
+                image["storage_uri"] = None
+                storage_uri = None
+            if storage_uri_key:
+                image["storage_uri_key"] = storage_uri_key
+            else:
+                image.pop("storage_uri_key", None)
+                storage_uri_key = None
+            resolved_image_id = image_id
+            reused_via_storage = False
+            if storage_uri:
+                rec = tx.run(
+                    "MATCH (i:Image {storage_uri: $storage_uri}) RETURN i.image_id AS image_id LIMIT 1",
+                    {"storage_uri": storage_uri},
+                ).single()
+                if rec and rec.get("image_id"):
+                    resolved_image_id = rec["image_id"]
+                    reused_via_storage = True
+            if not reused_via_storage and storage_uri_key:
+                rec = tx.run(
+                    (
+                        "MATCH (i:Image) "
+                        "WHERE i.storage_uri = $storage_uri_key "
+                        "OR i.storage_uri ENDS WITH $storage_uri_key "
+                        "RETURN i.image_id AS image_id LIMIT 1"
+                    ),
+                    {"storage_uri_key": storage_uri_key},
+                ).single()
+                if rec and rec.get("image_id"):
+                    resolved_image_id = rec["image_id"]
+            image["image_id"] = resolved_image_id
+            if resolved_image_id != image_id:
+                logger.info(
+                    "graph_repo.upsert_case.reuse_image",
+                    extra={
+                        "requested_image_id": image_id,
+                        "resolved_image_id": resolved_image_id,
+                        "storage_uri": storage_uri,
+                        "storage_uri_key": storage_uri_key,
+                    },
+                )
             rec = tx.run(UPSERT_CASE_QUERY, params).single()
             if rec is None:
                 return {"image_id": params["image"]["image_id"], "finding_ids": []}

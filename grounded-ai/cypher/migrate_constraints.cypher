@@ -1,5 +1,4 @@
-CREATE CONSTRAINT image_image_id_unique IF NOT EXISTS
-FOR (i:Image) REQUIRE i.image_id IS UNIQUE;
+CREATE CONSTRAINT IF NOT EXISTS FOR (i:Image) REQUIRE i.image_id IS UNIQUE;
 
 CREATE CONSTRAINT report_id_unique IF NOT EXISTS
 FOR (r:Report) REQUIRE r.id IS UNIQUE;
