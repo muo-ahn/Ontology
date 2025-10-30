@@ -138,10 +138,10 @@ OPTIONAL MATCH p3 = (i)-[:DESCRIBED_BY]->(r:Report)
 OPTIONAL MATCH p4 = (f)-[rel:RELATED_TO]->(f2:Finding)
 
 // 점수: finding conf 중심 + report conf 보조
-WITH i,f,a,r, f2,
+WITH i,f,a,r, f2, A, B,
      coalesce(f.conf,0.5) AS f_conf,
      coalesce(r.conf,0.5) AS r_conf
-WITH i,f,a,r,f2,
+WITH i,f,a,r,f2,A,B,
      (A*f_conf + B*r_conf) AS score
 
 // triples 구성
@@ -153,11 +153,11 @@ WITH i,f,a,r,f2,score,
        CASE WHEN f2 IS NOT NULL THEN 'Finding['+f.id+'] -RELATED_TO-> Finding['+f2.id+']' END
      ] AS trip_raw
 
-WITH i, score,
+WITH i, f, score,
      [t IN trip_raw WHERE t IS NOT NULL] AS triples
 
 // 라벨은 대표 finding type/location
-WITH i, score, triples,
+WITH i, f, score, triples,
      CASE
        WHEN size(triples)=0 THEN 'NoPath'
        ELSE
