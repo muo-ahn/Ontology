@@ -12,8 +12,11 @@ QDRANT_URL = http://qdrant:6333
 NEO4J_SVC ?= neo4j 
 IMPORT_DIR ?= /var/lib/neo4j/import
 HOST_DATA    ?= ./data/medical_dummy
-CYpher_FILE  ?= ./scripts/seed.cypher
-CYpher_FILE_load_all  ?= ./scripts/load_all.cypher
+CYpher_FILE  ?= ./scripts/cyphers/seed.cypher
+CYpher_FILE_load_all  ?= ./scripts/cyphers/load_all.cypher
+CYpher_FILE_load_a  ?= ./scripts/cyphers/seed_dummy_A.cypher
+CYpher_FILE_load_b  ?= ./scripts/cyphers/seed_dummy_B.cypher
+CYpher_FILE_load_c  ?= ./scripts/cyphers/seed_dummy_C.cypher
 CYpher_MIGRATE_IMAGE ?= ./cypher/migrate_image_id.cypher
 
 # ------------------------------------------
@@ -125,3 +128,44 @@ db-load:
 	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/load_all.cypher; \
 	docker exec -t $$cid rm -f /tmp/load_all.cypher; \
 	echo "✅ Neo4j LOAD CSV done."
+
+## Cypher 스크립트 실행(파일 기반; A 세트)
+db-load-a:
+	@echo "🧠 Running Cypher LOAD CSV for Dummy Set A from $(CYpher_FILE_load_a)..."
+	@[ -f $(CYpher_FILE_load_a) ] || { echo "❌ $(CYpher_FILE_load_a) not found. Create scripts/seed_dummy_A.cypher first."; exit 1; }
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker cp $(CYpher_FILE_load_a) $$cid:/tmp/seed_dummy_A.cypher; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/seed_dummy_A.cypher; \
+	docker exec -t $$cid rm -f /tmp/seed_dummy_A.cypher; \
+	echo "✅ Neo4j LOAD CSV for Dummy Set A done."
+
+## Cypher 스크립트 실행(파일 기반; B 세트)
+db-load-b:
+	@echo "🧠 Running Cypher LOAD CSV for Dummy Set B from $(CYpher_FILE_load_b)..."
+	@[ -f $(CYpher_FILE_load_b) ] || { echo "❌ $(CYpher_FILE_load_b) not found. Create scripts/seed_dummy_B.cypher first."; exit 1; }
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker cp $(CYpher_FILE_load_b) $$cid:/tmp/seed_dummy_B.cypher; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/seed_dummy_B.cypher; \
+	docker exec -t $$cid rm -f /tmp/seed_dummy_B.cypher; \
+	echo "✅ Neo4j LOAD CSV for Dummy Set B done."
+
+## Cypher 스크립트 실행(파일 기반; C 세트)
+db-load-c:
+	@echo "🧠 Running Cypher LOAD CSV for Dummy Set C from $(CYpher_FILE_load_c)..."
+	@[ -f $(CYpher_FILE_load_c) ] || { echo "❌ $(CYpher_FILE_load_c) not found. Create scripts/seed_dummy_C.cypher first."; exit 1; }
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker cp $(CYpher_FILE_load_c) $$cid:/tmp/seed_dummy_C.cypher; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) -f /tmp/seed_dummy_C.cypher; \
+	docker exec -t $$cid rm -f /tmp/seed_dummy_C.cypher; \
+	echo "✅ Neo4j LOAD CSV for Dummy Set C done."
+
+# ------------------------------------------
+db-delete:
+	@echo "🗑️ Deleting all nodes and relationships in Neo4j..."
+	@cid=$$(docker compose ps -q $(NEO4J_SVC)); \
+	if [ -z "$$cid" ]; then echo "❌ Neo4j container not running. Run 'make up' first."; exit 1; fi; \
+	docker exec -t $$cid cypher-shell -u $(NEO4J_USER) -p $(NEO4J_PASS) "MATCH (n) DETACH DELETE n;"; \
+	echo "✅ Deleted all nodes and relationships."

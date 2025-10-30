@@ -517,6 +517,40 @@ async def analyze(
 
         consensus = _build_consensus(results)
         results["consensus"] = consensus
+
+        # --- Post-consensus safety filter ---
+        ORGAN_KEYWORDS = {
+            "brain": ["brain", "cerebral", "stroke", "infarct"],
+            "liver": ["liver", "hepatic"],
+            "lung": ["lung", "pulmonary"],
+            "heart": ["heart", "cardiac"],
+        }
+
+        def _infer_expected_from_path(file_path: str):
+            path_lower = file_path.lower()
+            if "brain" in path_lower or "head" in path_lower:
+                return "brain"
+            if "liver" in path_lower or "abdomen" in path_lower:
+                return "liver"
+            if "chest" in path_lower:
+                return "lung"
+            return None
+
+        expected_organ = _infer_expected_from_path(payload.file_path)
+
+        if expected_organ:
+            offending = []
+            for organ, kws in ORGAN_KEYWORDS.items():
+                if organ != expected_organ and any(kw in consensus["text"].lower() for kw in kws):
+                    offending.append(organ)
+            if offending:
+                consensus["status"] = "disagree"
+                consensus["confidence"] = "very_low"
+                consensus["notes"] += f" | Guard: {offending} terms inconsistent with expected {expected_organ}"
+                consensus["presented_text"] = (
+                    "낮은 확신: 장기 불일치 가능성이 있어 단정이 어렵습니다."
+                )
+
         if debug_enabled:
             debug_blob["consensus"] = consensus
 
