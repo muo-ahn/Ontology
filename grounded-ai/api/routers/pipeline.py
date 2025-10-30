@@ -310,29 +310,6 @@ def _slugify(value: str) -> str:
     return cleaned[:48]
 
 
-def _canonical_storage_uri(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return None
-    candidate = Path(path)
-    name = candidate.name
-    if not name:
-        return None
-    posix = candidate.as_posix()
-    if posix.startswith("/data/dummy/") or posix.startswith("/mnt/data/medical_dummy"):
-        return posix
-
-    stem = candidate.stem
-    suffix = candidate.suffix.lower() if candidate.suffix else ".png"
-    lower_stem = stem.lower()
-    if re.fullmatch(r"img_\d{3}", lower_stem):
-        return f"/mnt/data/medical_dummy/images/{lower_stem}{suffix}"
-    if re.fullmatch(r"img\d{3}", lower_stem):
-        return f"/data/dummy/{stem.upper()}{suffix}"
-    if re.fullmatch(r"(ct|us|xr)\d{3}", lower_stem):
-        return f"/data/dummy/{stem.upper()}{suffix}"
-    return posix
-
-
 def _derive_image_id_from_path(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
@@ -475,15 +452,19 @@ async def analyze(
         image_id = normalized_image_id
         case_id = _resolve_case_id(payload, image_path, image_id)
         final_image_path = image_path or payload.file_path or normalized_image.get("path")
-        storage_uri = _canonical_storage_uri(payload.file_path)
-        if not storage_uri:
-            storage_uri = normalized_image.get("storage_uri")
-        if not storage_uri:
-            storage_uri = _canonical_storage_uri(normalized_image.get("path"))
-        if not storage_uri:
-            storage_uri = _canonical_storage_uri(resolved_path)
+        storage_uri_candidate = (
+            normalized_image.get("storage_uri")
+            or payload.file_path
+            or normalized_image.get("path")
+            or resolved_path
+        )
+        storage_uri = str(storage_uri_candidate) if storage_uri_candidate else None
         if not storage_uri and final_image_path:
-            storage_uri = _canonical_storage_uri(final_image_path)
+            storage_uri = str(final_image_path)
+        if storage_uri:
+            storage_uri = storage_uri.strip()
+            if not storage_uri:
+                storage_uri = None
         storage_uri_key = os.path.basename(storage_uri) if storage_uri else None
         if not storage_uri_key and resolved_path:
             storage_uri_key = os.path.basename(str(resolved_path))
@@ -534,8 +515,6 @@ async def analyze(
                 "pre_upsert_findings_head": normalized_findings[:2],
                 "pre_upsert_report_conf": normalized_report.get("conf"),
             })
-            debug_blob["norm_image_id"] = image_id
-            debug_blob["storage_uri"] = storage_uri
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
@@ -552,18 +531,9 @@ async def analyze(
         )
 
         current_stage = "upsert"
-        image_payload = {
-            "image_id": image_id,
-            "storage_uri": storage_uri,
-            "modality": normalized_image.get("modality"),
-        }
-        if final_image_path:
-            image_payload["path"] = final_image_path
-        if storage_uri_key:
-            image_payload["storage_uri_key"] = storage_uri_key
         graph_payload = {
             "case_id": case_id,
-            "image": image_payload,
+            "image": normalized["image"],
             "report": normalized["report"],
             "findings": normalized_findings,
             "idempotency_key": payload.idempotency_key,
