@@ -213,6 +213,7 @@ def test_pipeline_analyze_returns_paths_and_consensus(pipeline_app: FastAPI) -> 
     data = response.json()
     debug_blob = data.get("debug", {})
     assert debug_blob.get("context_paths_len", 0) >= 3
+    assert debug_blob.get("context_paths_triple_total", 0) >= debug_blob.get("context_paths_len", 0)
 
     graph_context = data.get("graph_context", {})
     paths = graph_context.get("paths", [])
@@ -221,3 +222,10 @@ def test_pipeline_analyze_returns_paths_and_consensus(pipeline_app: FastAPI) -> 
 
     consensus = data.get("results", {}).get("consensus", {})
     assert consensus.get("agreement_score", 0) > 0.2
+
+    evaluation = data.get("evaluation")
+    assert evaluation is not None
+    assert evaluation.get("ctx_paths_len", 0) == debug_blob.get("context_paths_triple_total", 0)
+    assert evaluation.get("consensus", {}).get("status") == consensus.get("status")
+    assert evaluation.get("agreement_score") == pytest.approx(consensus.get("agreement_score", 0), rel=1e-3)
+    assert isinstance(evaluation.get("similar_seed_images"), list)

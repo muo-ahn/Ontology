@@ -55,6 +55,19 @@ class KGUpsertRequest(BaseModel):
     findings: list[FindingModel] = Field(default_factory=list)
 
 
+class DummyEvaluation(BaseModel):
+    """Summary payload for dummy ontology evaluation."""
+
+    image_id: str
+    similar_seed_images: List[Dict[str, Any]] = Field(default_factory=list)
+    edges_created: int = 0
+    ctx_paths_len: int = 0
+    agreement_score: float = 0.0
+    confidence: str = "low"
+    context_paths: List[Dict[str, Any]] = Field(default_factory=list)
+    consensus: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AnalyzeResp(BaseModel):
     """HTTP response envelope for the /pipeline/analyze endpoint."""
 
@@ -66,3 +79,4 @@ class AnalyzeResp(BaseModel):
     timings: Dict[str, int] = Field(default_factory=dict)
     errors: List[Dict[str, str]] = Field(default_factory=list)
     debug: Dict[str, Any] = Field(default_factory=dict)
+    evaluation: Optional[DummyEvaluation] = None

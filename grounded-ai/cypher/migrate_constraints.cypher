@@ -1,5 +1,7 @@
 CREATE CONSTRAINT IF NOT EXISTS FOR (i:Image) REQUIRE i.image_id IS UNIQUE;
 
+CREATE INDEX IF NOT EXISTS FOR (img:Image) ON (img.storage_uri);
+
 CREATE CONSTRAINT report_id_unique IF NOT EXISTS
 FOR (r:Report) REQUIRE r.id IS UNIQUE;
 

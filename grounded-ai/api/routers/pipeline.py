@@ -25,6 +25,7 @@ from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
 from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
+from services.similarity import compute_similarity_scores
 from services.vlm_runner import VLMRunner
 
 from .llm import (
@@ -58,6 +59,11 @@ class AnalyzeReq(BaseModel):
     fallback_to_vl: bool = True
     timeout_ms: int = Field(default=20000, ge=1000, le=60000)
     idempotency_key: Optional[str] = None
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Optional overrides for similarity/context scoring")
+    k_paths: Optional[int] = Field(default=None, ge=0, le=10)
+    alpha_finding: Optional[float] = Field(default=None)
+    beta_report: Optional[float] = Field(default=None)
+    similarity_threshold: Optional[float] = Field(default=None)
 
     @field_validator("modes", mode="after")
     @classmethod
@@ -73,6 +79,15 @@ class AnalyzeReq(BaseModel):
             if mode not in normalised:
                 normalised.append(mode)
         return normalised
+
+    @field_validator("similarity_threshold", mode="after")
+    @classmethod
+    def _clamp_similarity_threshold(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError("similarity_threshold must be between 0.0 and 1.0")
+        return float(value)
 
 
 def clamp_one_line(text: str, max_chars: int) -> str:
@@ -320,6 +335,42 @@ def _derive_image_id_from_path(path: Optional[str]) -> Optional[str]:
     return alnum.upper()[:48]
 
 
+def _resolve_seed_storage_uri(file_path: Optional[str], image_id: Optional[str]) -> Optional[str]:
+    if not file_path:
+        return None
+    path = Path(file_path)
+    raw = str(path)
+    if raw.startswith("/mnt/data/medical_dummy/") or raw.startswith("/data/dummy/"):
+        return raw
+
+    suffix = path.suffix.lower()
+    if not suffix:
+        suffix = ".png"
+    stem = path.stem
+    normalized_id = (image_id or "").strip().upper()
+    stem_upper = stem.upper()
+
+    if re.match(r"^IMG_\d+$", normalized_id):
+        return f"/mnt/data/medical_dummy/images/{normalized_id.lower()}{suffix}"
+    if re.match(r"^IMG_\d+$", stem_upper):
+        return f"/mnt/data/medical_dummy/images/{stem.lower()}{suffix}"
+
+    if re.match(r"^IMG\d+$", normalized_id):
+        return f"/data/dummy/{normalized_id}{suffix}"
+    if re.match(r"^IMG\d+$", stem_upper):
+        return f"/data/dummy/{stem_upper}{suffix}"
+
+    if re.match(r"^(CT|US|XR)\d+$", normalized_id):
+        return f"/data/dummy/{normalized_id}{suffix}"
+    if re.match(r"^(CT|US|XR)\d+$", stem_upper):
+        return f"/data/dummy/{stem_upper}{suffix}"
+
+    if stem.lower().startswith("img_"):
+        return f"/mnt/data/medical_dummy/images/{stem.lower()}{suffix}"
+
+    return raw
+
+
 def _resolve_case_id(payload: AnalyzeReq, image_path: Optional[str], image_id: str) -> str:
     if payload.case_id:
         return payload.case_id
@@ -399,6 +450,64 @@ async def analyze(
     graph_repo: Optional[GraphRepo] = None
     context_builder: Optional[GraphContextBuilder] = None
     debug_blob: Dict[str, Any] = {"stage": "init"}
+    param_overrides: Dict[str, Any] = dict(payload.parameters or {})
+
+    def _resolve_int_param(
+        primary: Optional[int],
+        key: str,
+        default: int,
+        *,
+        ge: Optional[int] = None,
+        le: Optional[int] = None,
+    ) -> int:
+        candidate = primary if primary is not None else param_overrides.get(key)
+        if candidate is None:
+            return default
+        try:
+            value = int(candidate)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"{key} must be an integer")
+        if ge is not None and value < ge:
+            raise HTTPException(status_code=422, detail=f"{key} must be ≥ {ge}")
+        if le is not None and value > le:
+            raise HTTPException(status_code=422, detail=f"{key} must be ≤ {le}")
+        return value
+
+    def _resolve_float_param(
+        primary: Optional[float],
+        key: str,
+        default: Optional[float],
+        *,
+        ge: Optional[float] = None,
+        le: Optional[float] = None,
+    ) -> Optional[float]:
+        candidate = primary if primary is not None else param_overrides.get(key)
+        if candidate is None:
+            return default
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"{key} must be a number")
+        if ge is not None and value < ge:
+            raise HTTPException(status_code=422, detail=f"{key} must be ≥ {ge}")
+        if le is not None and value > le:
+            raise HTTPException(status_code=422, detail=f"{key} must be ≤ {le}")
+        return value
+
+    def _resolve_confidence_level(score: float, path_triples: int) -> str:
+        if score >= 0.7 and path_triples >= 3:
+            return "high"
+        if score >= 0.5 and path_triples >= 3:
+            return "medium"
+        return "low"
+
+    resolved_k_paths = _resolve_int_param(payload.k_paths, "k_paths", payload.k, ge=0, le=10)
+    alpha_param = _resolve_float_param(payload.alpha_finding, "alpha_finding", None)
+    beta_param = _resolve_float_param(payload.beta_report, "beta_report", None)
+    similarity_threshold = _resolve_float_param(payload.similarity_threshold, "similarity_threshold", 0.5, ge=0.0, le=1.0)
+    similar_seed_images: List[Dict[str, Any]] = []
+    similarity_edges_created = 0
+    similarity_candidates_debug = 0
 
     try:
         current_stage = "image_load"
@@ -452,19 +561,13 @@ async def analyze(
         image_id = normalized_image_id
         case_id = _resolve_case_id(payload, image_path, image_id)
         final_image_path = image_path or payload.file_path or normalized_image.get("path")
-        storage_uri_candidate = (
-            normalized_image.get("storage_uri")
-            or payload.file_path
-            or normalized_image.get("path")
-            or resolved_path
-        )
-        storage_uri = str(storage_uri_candidate) if storage_uri_candidate else None
+        storage_uri = _resolve_seed_storage_uri(resolved_path, normalized_image_id)
+        if not storage_uri:
+            storage_uri = normalized_image.get("storage_uri")
         if not storage_uri and final_image_path:
-            storage_uri = str(final_image_path)
-        if storage_uri:
-            storage_uri = storage_uri.strip()
-            if not storage_uri:
-                storage_uri = None
+            storage_uri = _resolve_seed_storage_uri(final_image_path, normalized_image_id) or str(final_image_path)
+        if storage_uri and isinstance(storage_uri, str):
+            storage_uri = storage_uri.strip() or None
         storage_uri_key = os.path.basename(storage_uri) if storage_uri else None
         if not storage_uri_key and resolved_path:
             storage_uri_key = os.path.basename(str(resolved_path))
@@ -515,6 +618,8 @@ async def analyze(
                 "pre_upsert_findings_head": normalized_findings[:2],
                 "pre_upsert_report_conf": normalized_report.get("conf"),
             })
+            debug_blob["norm_image_id"] = image_id
+            debug_blob["storage_uri"] = storage_uri
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
@@ -531,9 +636,15 @@ async def analyze(
         )
 
         current_stage = "upsert"
+        image_payload = {
+            "image_id": image_id,
+            "modality": normalized_image.get("modality"),
+            "storage_uri": normalized_image.get("storage_uri"),
+            "path": normalized_image.get("path"),
+        }
         graph_payload = {
             "case_id": case_id,
-            "image": normalized["image"],
+            "image": image_payload,
             "report": normalized["report"],
             "findings": normalized_findings,
             "idempotency_key": payload.idempotency_key,
@@ -563,17 +674,42 @@ async def analyze(
         if debug and len(normalized_findings) > 0 and persisted_f_cnt == 0:
             errors.append({"stage": "upsert", "msg": "normalized findings present but upsert returned no finding_ids"})
 
+        if graph_repo is not None:
+            current_stage = "similarity"
+            try:
+                candidates = graph_repo.fetch_similarity_candidates(image_id)
+                similarity_candidates_debug = len(candidates)
+                new_image_payload = {
+                    "modality": normalized_image.get("modality"),
+                    "findings": normalized_findings,
+                }
+                edges_payload, summary_payload = compute_similarity_scores(
+                    new_image=new_image_payload,
+                    candidates=candidates,
+                    threshold=float(similarity_threshold) if similarity_threshold is not None else 0.5,
+                    top_k=10,
+                )
+                similar_seed_images = summary_payload
+                similarity_edges_created = graph_repo.sync_similarity_edges(image_id, edges_payload)
+            except Exception as exc:
+                errors.append({"stage": "similarity", "msg": str(exc)})
+
         current_stage = "context"
         with timeit(timings, "context_ms"):
             context_bundle = context_builder.build_bundle(
                 image_id=image_id,
-                k=payload.k,
+                k=resolved_k_paths,
                 max_chars=GRAPH_TRIPLE_CHAR_CAP,
+                alpha_finding=alpha_param,
+                beta_report=beta_param,
             )
 
         no_graph_evidence = False
         facts: Any = {}
         paths: Any = []
+        findings_list: List[Dict[str, Any]] = []
+        paths_list: List[Dict[str, Any]] = []
+        ctx_paths_total = 0
         try:
             facts = (context_bundle.get("facts") or {})
             paths = (context_bundle.get("paths") or [])
@@ -584,9 +720,13 @@ async def analyze(
         except Exception:
             pass
 
+        if isinstance(facts, dict):
+            findings_list = list(facts.get("findings") or [])
+        if isinstance(paths, list):
+            paths_list = list(paths)
+        ctx_paths_total = sum(len(path.get("triples") or []) for path in paths_list)
+
         if debug_enabled:
-            findings_list = (facts.get("findings") or []) if isinstance(facts, dict) else []
-            paths_list = paths if isinstance(paths, list) else []
             debug_blob.update({
                 "stage": "context",
                 "context_summary": context_bundle.get("summary"),
@@ -594,6 +734,11 @@ async def analyze(
                 "context_findings_head": findings_list[:2],
                 "context_paths_len": len(paths_list),
                 "context_paths_head": paths_list[:2],
+                "context_paths_triple_total": ctx_paths_total,
+                "similar_seed_images": similar_seed_images,
+                "similarity_edges_created": similarity_edges_created,
+                "similarity_threshold": similarity_threshold,
+                "similarity_candidates_considered": similarity_candidates_debug,
             })
 
         results: Dict[str, Dict[str, Any]] = {}
@@ -722,6 +867,34 @@ async def analyze(
                     "낮은 확신: 장기 불일치 가능성이 있어 단정이 어렵습니다."
                 )
 
+        results["similar_seed_images"] = similar_seed_images
+        agreement_score = float(consensus.get("agreement_score") or 0.0)
+        confidence_level = _resolve_confidence_level(agreement_score, ctx_paths_total)
+        consensus_notes = consensus.get("notes") or ""
+        evaluation_consensus = {
+            "text": consensus.get("text") or "",
+            "status": consensus.get("status") or "",
+            "notes": consensus_notes,
+        }
+        if consensus.get("supporting_modes"):
+            evaluation_consensus["supporting_modes"] = consensus.get("supporting_modes")
+        if consensus.get("disagreed_modes"):
+            evaluation_consensus["disagreed_modes"] = consensus.get("disagreed_modes")
+
+        evaluation_payload = {
+            "image_id": image_id,
+            "similar_seed_images": similar_seed_images,
+            "edges_created": similarity_edges_created,
+            "ctx_paths_len": ctx_paths_total,
+            "agreement_score": round(agreement_score, 3),
+            "confidence": confidence_level,
+            "context_paths": paths_list,
+            "consensus": evaluation_consensus,
+        }
+
+        if debug_enabled:
+            debug_blob["evaluation"] = evaluation_payload
+
         response = {
             "ok": True,
             "case_id": case_id,
@@ -731,6 +904,7 @@ async def analyze(
             "timings": timings,
             "errors": errors,
             "debug": debug_blob if debug_enabled else {},
+            "evaluation": evaluation_payload,
         }
 
         return AnalyzeResp(**response)

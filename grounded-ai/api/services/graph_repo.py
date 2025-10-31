@@ -32,12 +32,16 @@ PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
 PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
-MERGE (i:Image {image_id: $image.image_id})
-SET  i.path = $image.path,
-     i.modality = $image.modality,
-     i.storage_uri = coalesce($image.storage_uri, i.storage_uri)
+WITH $image AS img
+OPTIONAL MATCH (existing:Image {storage_uri: img.storage_uri})
+WITH coalesce(existing.image_id, img.image_id) AS resolved_id, img
+MERGE (i:Image {image_id: resolved_id})
+SET  i.path = coalesce(img.path, i.path),
+     i.modality = coalesce(img.modality, i.modality),
+     i.storage_uri = coalesce(img.storage_uri, i.storage_uri)
+WITH i, img, $report AS r
 
-WITH i, $report AS r
+WITH i, r
 CALL {
   WITH i, r
   WITH i, r WHERE r IS NOT NULL
@@ -125,33 +129,72 @@ RETURN {
 
 # Cypher query retrieving weighted top-k explanation paths for a given image.
 TOPK_PATHS_QUERY = """
-WITH $image_id AS image_id, $k AS k,
+WITH $image_id AS qid, $k AS k,
      toFloat(coalesce($alpha_finding,0.6)) AS A,
      toFloat(coalesce($beta_report,0.4))   AS B
-MATCH (i:Image {image_id:image_id})
-OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
+MATCH (q:Image {image_id: qid})
+OPTIONAL MATCH (q)-[:HAS_FINDING]->(f0:Finding)
+OPTIONAL MATCH (q)-[:DESCRIBED_BY]->(r0:Report)
+OPTIONAL MATCH (q)-[sim:SIMILAR_TO]->(s:Image)
+WITH q,f0,r0,sim,s, A,B, coalesce(sim.score,0.5) AS simw
+OPTIONAL MATCH (s)-[:HAS_FINDING]->(f:Finding)
 OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(r:Report)
+OPTIONAL MATCH (s)-[:DESCRIBED_BY]->(r:Report)
 OPTIONAL MATCH (f)-[:RELATED_TO]->(f2:Finding)
-WITH i,f,a,r,f2,A,B,
+WITH q,s,f,a,r,f2,f0,r0,simw,A,B,
      coalesce(f.conf,0.5) AS f_conf,
      coalesce(r.conf,0.5) AS r_conf
-WITH i,f,a,r,f2,(A*f_conf + B*r_conf) AS score,
+WITH q,
+     (simw * (A*f_conf + B*r_conf)) AS score,
+     coalesce(f.type,'Finding') AS label,
      [
-       CASE WHEN f IS NOT NULL THEN 'Image['+i.image_id+'] -HAS_FINDING-> Finding['+f.id+']' END,
-       CASE WHEN a IS NOT NULL THEN 'Finding['+f.id+'] -LOCATED_IN-> Anatomy['+a.code+']' END,
-       CASE WHEN r IS NOT NULL THEN 'Image['+i.image_id+'] -DESCRIBED_BY-> Report['+r.id+']' END,
-       CASE WHEN f2 IS NOT NULL THEN 'Finding['+f.id+'] -RELATED_TO-> Finding['+f2.id+']' END
-     ] AS trip_raw
-WITH {label: coalesce(f.type,'Finding'),
-      score: score,
-      triples: [t IN trip_raw WHERE t IS NOT NULL]} AS path
+       CASE WHEN f0 IS NOT NULL THEN 'Image['+q.image_id+'] -HAS_FINDING-> Finding['+f0.id+']' END,
+       CASE WHEN r0 IS NOT NULL THEN 'Image['+q.image_id+'] -DESCRIBED_BY-> Report['+r0.id+']' END,
+       'Image['+q.image_id+'] -SIMILAR_TO-> Image['+coalesce(s.image_id,'?')+']',
+       CASE WHEN f IS NOT NULL  THEN 'Image['+coalesce(s.image_id,'?')+'] -HAS_FINDING-> Finding['+f.id+']' END,
+       CASE WHEN a IS NOT NULL  THEN 'Finding['+coalesce(f.id,'?')+'] -LOCATED_IN-> Anatomy['+a.code+']' END,
+       CASE WHEN r IS NOT NULL  THEN 'Image['+coalesce(s.image_id,'?')+'] -DESCRIBED_BY-> Report['+r.id+']' END,
+       CASE WHEN f2 IS NOT NULL THEN 'Finding['+coalesce(f.id,'?')+'] -RELATED_TO-> Finding['+f2.id+']' END
+     ] AS raw_triples
+WITH {label:label, score:score, triples:[t IN raw_triples WHERE t IS NOT NULL]} AS path
 WITH collect(path) AS all
 UNWIND all AS p
 WITH p.label AS label, p.triples AS triples, p.score AS score
+WHERE size(triples) > 0
+WITH label, triples, score
 ORDER BY score DESC
-WITH collect({label:label, triples:triples, score:score}) AS ranked
-RETURN ranked[0..$k] AS paths;
+WITH collect({label:label, triples:triples, score:score})[0..$k] AS ranked
+RETURN ranked AS paths;
+"""
+
+SIMILARITY_CANDIDATES_QUERY = """
+MATCH (seed:Image)
+WHERE seed.image_id <> $image_id
+OPTIONAL MATCH (seed)-[:HAS_FINDING]->(f:Finding)
+OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
+RETURN seed.image_id AS image_id,
+       seed.modality AS modality,
+       collect(DISTINCT toLower(f.type)) AS finding_types,
+       collect(DISTINCT toLower(f.location)) AS finding_locations,
+       collect(DISTINCT toLower(a.code)) AS anatomy_codes;
+"""
+
+DELETE_SIMILARITY_EDGES_QUERY = """
+MATCH (:Image {image_id:$image_id})-[rel:SIMILAR_TO]->(:Image)
+DELETE rel;
+"""
+
+UPSERT_SIMILARITY_EDGES_QUERY = """
+MATCH (src:Image {image_id:$image_id})
+WITH src
+UNWIND $edges AS edge
+MATCH (dst:Image {image_id: edge.image_id})
+MERGE (src)-[rel:SIMILAR_TO]->(dst)
+ON CREATE SET rel.created_at = datetime()
+SET rel.score = toFloat(edge.score),
+    rel.basis = edge.basis,
+    rel.updated_at = datetime()
+RETURN count(rel) AS edges;
 """
 
 class GraphRepo:
@@ -263,51 +306,11 @@ class GraphRepo:
                 raise ValueError("image.image_id is required")
             storage_uri_raw = image.get("storage_uri")
             storage_uri = storage_uri_raw.strip() if isinstance(storage_uri_raw, str) else None
-            storage_uri_key_raw = image.get("storage_uri_key")
-            storage_uri_key = storage_uri_key_raw.strip() if isinstance(storage_uri_key_raw, str) else None
-            if storage_uri:
-                image["storage_uri"] = storage_uri
-            else:
-                image["storage_uri"] = None
-                storage_uri = None
-            if storage_uri_key:
-                image["storage_uri_key"] = storage_uri_key
-            else:
-                image.pop("storage_uri_key", None)
-                storage_uri_key = None
-            resolved_image_id = image_id
-            reused_via_storage = False
-            if storage_uri:
-                rec = tx.run(
-                    "MATCH (i:Image {storage_uri: $storage_uri}) RETURN i.image_id AS image_id LIMIT 1",
-                    {"storage_uri": storage_uri},
-                ).single()
-                if rec and rec.get("image_id"):
-                    resolved_image_id = rec["image_id"]
-                    reused_via_storage = True
-            if not reused_via_storage and storage_uri_key:
-                rec = tx.run(
-                    (
-                        "MATCH (i:Image) "
-                        "WHERE i.storage_uri = $storage_uri_key "
-                        "OR i.storage_uri ENDS WITH $storage_uri_key "
-                        "RETURN i.image_id AS image_id LIMIT 1"
-                    ),
-                    {"storage_uri_key": storage_uri_key},
-                ).single()
-                if rec and rec.get("image_id"):
-                    resolved_image_id = rec["image_id"]
-            image["image_id"] = resolved_image_id
-            if resolved_image_id != image_id:
-                logger.info(
-                    "graph_repo.upsert_case.reuse_image",
-                    extra={
-                        "requested_image_id": image_id,
-                        "resolved_image_id": resolved_image_id,
-                        "storage_uri": storage_uri,
-                        "storage_uri_key": storage_uri_key,
-                    },
-                )
+            image["storage_uri"] = storage_uri
+            image.pop("storage_uri_key", None)
+            path_value = image.get("path")
+            if path_value is not None and not isinstance(path_value, str):
+                image["path"] = str(path_value)
             rec = tx.run(UPSERT_CASE_QUERY, params).single()
             if rec is None:
                 return {"image_id": params["image"]["image_id"], "finding_ids": []}
@@ -331,17 +334,53 @@ class GraphRepo:
             return default
         return bundle
 
-    def query_paths(self, image_id: str, k: int = 2) -> List[Dict[str, Any]]:
+    def query_paths(
+        self,
+        image_id: str,
+        k: int = 2,
+        *,
+        alpha_finding: Optional[float] = None,
+        beta_report: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         params = {
             "image_id": image_id,
             "k": k,
-            "alpha_finding": PATH_SCORE_ALPHA_FINDING,
-            "beta_report": PATH_SCORE_BETA_REPORT,
+            "alpha_finding": PATH_SCORE_ALPHA_FINDING if alpha_finding is None else alpha_finding,
+            "beta_report": PATH_SCORE_BETA_REPORT if beta_report is None else beta_report,
         }
         records = self._run_read(TOPK_PATHS_QUERY, params)
         if not records:
             return []
         return list(records[0]["paths"] or [])
+
+    def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+        records = self._run_read(SIMILARITY_CANDIDATES_QUERY, {"image_id": image_id})
+        payload: List[Dict[str, Any]] = []
+        for rec in records:
+            payload.append(
+                {
+                    "image_id": rec.get("image_id"),
+                    "modality": rec.get("modality"),
+                    "finding_types": [item for item in (rec.get("finding_types") or []) if item],
+                    "finding_locations": [item for item in (rec.get("finding_locations") or []) if item],
+                    "anatomy_codes": [item for item in (rec.get("anatomy_codes") or []) if item],
+                }
+            )
+        return payload
+
+    def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+        def _tx_fn(tx):
+            tx.run(DELETE_SIMILARITY_EDGES_QUERY, {"image_id": image_id})
+            if not edges:
+                return 0
+            result = tx.run(UPSERT_SIMILARITY_EDGES_QUERY, {"image_id": image_id, "edges": edges})
+            record = result.single()
+            return int(record["edges"]) if record and record.get("edges") is not None else 0
+
+        if hasattr(self._driver, "execute_write"):
+            return self._driver.execute_write(_tx_fn)
+        with self._driver.session(database=self._database) as session:
+            return session.write_transaction(_tx_fn)
 
 
 __all__ = ["GraphRepo"]

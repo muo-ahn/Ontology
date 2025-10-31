@@ -60,6 +60,8 @@ class GraphContextBuilder:
         mode: str = "triples",
         *,
         max_chars: int = 1800,
+        alpha_finding: Optional[float] = None,
+        beta_report: Optional[float] = None,
     ) -> str:
         mode_normalised = mode.lower()
         if mode_normalised not in {"triples", "json"}:
@@ -70,7 +72,13 @@ class GraphContextBuilder:
             facts = ContextFacts(**bundle.get("facts", {"image_id": image_id, "findings": []}))
             return json_dumps_safe(facts.model_dump(mode="python"))
 
-        bundle = self.build_bundle(image_id=image_id, k=k, max_chars=max_chars)
+        bundle = self.build_bundle(
+            image_id=image_id,
+            k=k,
+            max_chars=max_chars,
+            alpha_finding=alpha_finding,
+            beta_report=beta_report,
+        )
         return bundle["triples"]
 
     def build_bundle(
@@ -80,6 +88,8 @@ class GraphContextBuilder:
         k: int = 2,
         max_chars: int = 1800,
         hard_trim: bool = True,
+        alpha_finding: Optional[float] = None,
+        beta_report: Optional[float] = None,
     ) -> Dict[str, Any]:
         if k < 0:
             raise ValueError("k must be >= 0")
@@ -111,7 +121,12 @@ class GraphContextBuilder:
 
         paths_rows: Sequence[Dict[str, Any]] = []
         while True:
-            paths_rows = self._repo.query_paths(image_id, current_k)
+            paths_rows = self._repo.query_paths(
+                image_id,
+                current_k,
+                alpha_finding=alpha_finding,
+                beta_report=beta_report,
+            )
             rendered = _render(paths_rows)
             triples_text = rendered["triples_text"]
             if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
@@ -218,4 +233,3 @@ __all__ = [
     "ContextFacts",
     "EvidencePath",
 ]
-

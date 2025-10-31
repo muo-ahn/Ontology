@@ -5,3 +5,6 @@ grounded-ai/data/uploads/
 /.venv/
 .env
 .vscode/
+logs/
+*.log
+.DS_Store

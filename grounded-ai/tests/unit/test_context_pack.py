@@ -2,9 +2,30 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Dict, List
+import sys
+import types
+from typing import Any, Dict, List
 
 import pytest
+
+if "py2neo" not in sys.modules:
+    mock_py2neo = types.ModuleType("py2neo")
+    mock_py2neo.Graph = object
+    mock_py2neo.Node = object
+    mock_py2neo.Relationship = object
+    mock_py2neo.errors = types.SimpleNamespace(ClientError=Exception)
+    sys.modules["py2neo"] = mock_py2neo
+    mock_py2neo_errors = types.ModuleType("py2neo.errors")
+    mock_py2neo_errors.ClientError = Exception
+    sys.modules["py2neo.errors"] = mock_py2neo_errors
+
+if "neo4j" not in sys.modules:
+    mock_neo4j = types.ModuleType("neo4j")
+    mock_neo4j.GraphDatabase = types.SimpleNamespace(driver=lambda *args, **kwargs: object())
+    sys.modules["neo4j"] = mock_neo4j
+    mock_neo4j_exceptions = types.ModuleType("neo4j.exceptions")
+    mock_neo4j_exceptions.Neo4jError = Exception
+    sys.modules["neo4j.exceptions"] = mock_neo4j_exceptions
 
 from services.context_pack import ContextPackBuilder, GraphContextBuilder
 
@@ -23,13 +44,15 @@ class DummyRepo:
         self._fallback_paths = fallback_paths or []
         self.bundle_calls: List[str] = []
         self.path_calls: List[int] = []
+        self.path_kwargs: List[Dict[str, Any]] = []
 
     def query_bundle(self, image_id: str) -> Dict[str, object]:
         self.bundle_calls.append(image_id)
         return deepcopy(self._bundle)
 
-    def query_paths(self, image_id: str, k: int) -> List[Dict[str, object]]:
+    def query_paths(self, image_id: str, k: int, **kwargs: Any) -> List[Dict[str, object]]:
         self.path_calls.append(k)
+        self.path_kwargs.append(dict(kwargs))
         payload = deepcopy(self._paths_by_k.get(k, self._fallback_paths))
         return payload
 

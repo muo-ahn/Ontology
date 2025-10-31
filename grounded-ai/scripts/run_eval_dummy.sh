@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# how to run:
+# bash scripts/run_eval_dummy.sh [A/B/C] [top-k] [max_chars] [image_path]
+# example:
+# bash scripts/run_eval_dummy.sh A 2 120 /data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png
+
+
 # Configure how cypher queries will be executed (local binary vs docker exec).
 CYPHER_MODE=""
 CYPHER_SHELL_BIN=""
@@ -120,11 +126,6 @@ if [ "${CYPHER_MODE}" = "docker" ]; then
   ensure_docker_ready
   echo "[*] Using dockerized cypher-shell via ${DOCKER_COMPOSE_CMD[*]} exec neo4j ..."
 fi
-
-# how to run:
-# bash scripts/run_eval_dummy.sh [A/B/C] [top-k] [max_chars] [image_path]
-# example:
-# bash scripts/run_eval_dummy.sh A 2 120 /data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png
 
 DATASET="${1:-A}"   # A/B/C
 K="${2:-2}"         # top-k paths
