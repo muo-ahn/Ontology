@@ -42,6 +42,86 @@ def _build_evidence_paths(paths: Sequence[Dict[str, Any]]) -> List["EvidencePath
     return evidence_paths
 
 
+_PATH_SLOT_KEYS: Sequence[str] = ("findings", "reports", "similarity")
+
+
+def _sanitise_slot_values(explicit: Optional[Dict[str, int]]) -> Dict[str, int]:
+    if not explicit:
+        return {}
+    clean: Dict[str, int] = {}
+    for key in _PATH_SLOT_KEYS:
+        if key not in explicit:
+            continue
+        value = explicit[key]
+        try:
+            value_int = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"k_slots['{key}'] must be an integer") from exc
+        clean[key] = max(value_int, 0)
+    return clean
+
+
+def _cap_slots(slots: Dict[str, int], limit: int) -> Dict[str, int]:
+    if limit <= 0:
+        return {key: 0 for key in _PATH_SLOT_KEYS}
+    order = ("similarity", "reports", "findings")
+    capped = {key: max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS}
+    while sum(capped.values()) > limit:
+        for key in order:
+            if capped[key] > 0:
+                capped[key] -= 1
+                if sum(capped.values()) <= limit:
+                    break
+        else:  # pragma: no cover - defensive; should not occur
+            break
+    return capped
+
+
+def _resolve_path_slots(total: int, explicit: Optional[Dict[str, int]] = None) -> Dict[str, int]:
+    total_budget = max(int(total), 0)
+    explicit_clean = _sanitise_slot_values(explicit)
+    if explicit_clean:
+        return _cap_slots(explicit_clean, total_budget)
+
+    slots = {key: 0 for key in _PATH_SLOT_KEYS}
+    if total_budget == 0:
+        return slots
+
+    remaining = total_budget
+    slots["findings"] = min(2, remaining)
+    remaining -= slots["findings"]
+
+    if remaining > 0:
+        slots["reports"] = min(2, remaining)
+        remaining -= slots["reports"]
+
+    if remaining > 0:
+        slots["similarity"] = remaining
+
+    return slots
+
+
+def _dedupe_path_rows(paths: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for row in paths:
+        label = str(row.get("label") or "")
+        triples_raw = row.get("triples") or []
+        triples = tuple(str(item) for item in triples_raw if item is not None)
+        if not triples:
+            continue
+        key = (label, triples)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({
+            "label": label,
+            "triples": list(triples),
+            "score": row.get("score"),
+        })
+    return deduped
+
+
 class GraphContextBuilder:
     """Fetches and formats graph-derived context for LLM prompts."""
 
@@ -62,6 +142,7 @@ class GraphContextBuilder:
         max_chars: int = 1800,
         alpha_finding: Optional[float] = None,
         beta_report: Optional[float] = None,
+        k_slots: Optional[Dict[str, int]] = None,
     ) -> str:
         mode_normalised = mode.lower()
         if mode_normalised not in {"triples", "json"}:
@@ -78,6 +159,7 @@ class GraphContextBuilder:
             max_chars=max_chars,
             alpha_finding=alpha_finding,
             beta_report=beta_report,
+            k_slots=k_slots,
         )
         return bundle["triples"]
 
@@ -90,6 +172,7 @@ class GraphContextBuilder:
         hard_trim: bool = True,
         alpha_finding: Optional[float] = None,
         beta_report: Optional[float] = None,
+        k_slots: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         if k < 0:
             raise ValueError("k must be >= 0")
@@ -102,6 +185,7 @@ class GraphContextBuilder:
 
         summary_text = _format_edge_summary(summary_rows)
         current_k = max(k, 0)
+        slot_overrides = dict(k_slots or {})
 
         def _render(current_paths: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             evidence_paths = _build_evidence_paths(current_paths)
@@ -120,13 +204,18 @@ class GraphContextBuilder:
             }
 
         paths_rows: Sequence[Dict[str, Any]] = []
+        rendered_bundle: Dict[str, Any] = {}
+        final_slot_limits: Dict[str, int] = {}
         while True:
-            paths_rows = self._repo.query_paths(
+            slot_limits = _resolve_path_slots(current_k, slot_overrides)
+            raw_paths = self._repo.query_paths(
                 image_id,
                 current_k,
                 alpha_finding=alpha_finding,
                 beta_report=beta_report,
+                k_slots=slot_limits,
             )
+            paths_rows = _dedupe_path_rows(raw_paths)
             rendered = _render(paths_rows)
             triples_text = rendered["triples_text"]
             if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
@@ -134,10 +223,11 @@ class GraphContextBuilder:
                     break
                 current_k -= 1
                 continue
+            rendered_bundle = rendered
+            final_slot_limits = slot_limits
             break
 
-        rendered = _render(paths_rows)
-        triples_text = rendered["triples_text"]
+        triples_text = rendered_bundle.get("triples_text", "")
         if max_chars and max_chars > 0 and len(triples_text) > max_chars and hard_trim:
             trimmed = triples_text[: max_chars - 1].rstrip()
             triples_text = f"{trimmed}…"
@@ -145,7 +235,7 @@ class GraphContextBuilder:
         summary_lines = [line for line in _render_edge_summary_lines(summary_rows) if line]
         paths_payload = [
             {"label": path.label, "triples": path.triples}
-            for path in rendered["evidence_paths"]
+            for path in rendered_bundle.get("evidence_paths", [])
         ]
 
         return {
@@ -153,6 +243,7 @@ class GraphContextBuilder:
             "paths": paths_payload,
             "facts": facts_payload,
             "triples": triples_text,
+            "slot_limits": final_slot_limits,
         }
 
     def _format_evidence_section(self, paths: Sequence["EvidencePath"]) -> str:
@@ -211,16 +302,20 @@ class ContextPackBuilder:
         if self._owns_repo:
             self._repo.close()
 
-    def build(self, image_id: str, *, k: Optional[int] = None) -> ContextPack:
-        k_value = k or self.top_k_paths
+    def build(self, image_id: str, *, k: Optional[int] = None, k_slots: Optional[Dict[str, int]] = None) -> ContextPack:
+        k_raw = self.top_k_paths if k is None else k
+        if k_raw < 0:
+            raise ValueError("k must be >= 0")
+        k_value = k_raw
         bundle_payload = self._repo.query_bundle(image_id)
         summary_rows = bundle_payload.get("summary", [])
         facts_payload = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
         facts = ContextFacts(**facts_payload)
 
         edge_summary = _format_edge_summary(summary_rows)
-        path_rows = self._repo.query_paths(image_id, k_value)
-        evidence_paths = _build_evidence_paths(path_rows)
+        slot_limits = _resolve_path_slots(k_value, k_slots)
+        path_rows = self._repo.query_paths(image_id, k_value, k_slots=slot_limits)
+        evidence_paths = _build_evidence_paths(_dedupe_path_rows(path_rows))
 
         return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
 

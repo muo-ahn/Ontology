@@ -502,6 +502,24 @@ async def analyze(
         return "low"
 
     resolved_k_paths = _resolve_int_param(payload.k_paths, "k_paths", payload.k, ge=0, le=10)
+
+    slot_overrides: Dict[str, int] = {}
+    slot_param_map = {
+        "k_findings": "findings",
+        "k_reports": "reports",
+        "k_similarity": "similarity",
+    }
+    for param_name, slot_name in slot_param_map.items():
+        if param_name not in param_overrides:
+            continue
+        raw_value = param_overrides[param_name]
+        try:
+            slot_value = int(raw_value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"{param_name} must be an integer")
+        if slot_value < 0:
+            raise HTTPException(status_code=422, detail=f"{param_name} must be ≥ 0")
+        slot_overrides[slot_name] = slot_value
     alpha_param = _resolve_float_param(payload.alpha_finding, "alpha_finding", None)
     beta_param = _resolve_float_param(payload.beta_report, "beta_report", None)
     similarity_threshold = _resolve_float_param(payload.similarity_threshold, "similarity_threshold", 0.5, ge=0.0, le=1.0)
@@ -702,6 +720,7 @@ async def analyze(
                 max_chars=GRAPH_TRIPLE_CHAR_CAP,
                 alpha_finding=alpha_param,
                 beta_report=beta_param,
+                k_slots=slot_overrides or None,
             )
 
         no_graph_evidence = False
@@ -735,6 +754,7 @@ async def analyze(
                 "context_paths_len": len(paths_list),
                 "context_paths_head": paths_list[:2],
                 "context_paths_triple_total": ctx_paths_total,
+                "context_slot_limits": context_bundle.get("slot_limits"),
                 "similar_seed_images": similar_seed_images,
                 "similarity_edges_created": similarity_edges_created,
                 "similarity_threshold": similarity_threshold,

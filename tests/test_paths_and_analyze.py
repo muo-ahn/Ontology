@@ -214,11 +214,16 @@ def test_pipeline_analyze_returns_paths_and_consensus(pipeline_app: FastAPI) -> 
     debug_blob = data.get("debug", {})
     assert debug_blob.get("context_paths_len", 0) >= 3
     assert debug_blob.get("context_paths_triple_total", 0) >= debug_blob.get("context_paths_len", 0)
+    assert isinstance(debug_blob.get("context_slot_limits"), dict)
 
     graph_context = data.get("graph_context", {})
     paths = graph_context.get("paths", [])
     assert len(paths) >= 3
     assert len(paths[0].get("triples", [])) >= 3
+    summary_lines = graph_context.get("summary", [])
+    assert any("LOCATED_IN" in line for line in summary_lines)
+    if debug_blob.get("similarity_edges_created", 0):
+        assert any("SIMILAR_TO" in line for line in summary_lines)
 
     consensus = data.get("results", {}).get("consensus", {})
     assert consensus.get("agreement_score", 0) > 0.2

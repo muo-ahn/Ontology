@@ -105,12 +105,14 @@ def test_build_bundle_includes_evidence_paths():
 
     assert repo.bundle_calls == ["IMG_123"]
     assert repo.path_calls == [2]
+    assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 0, "similarity": 0}
     assert bundle["summary"][0] == "[EDGE SUMMARY]"
     assert bundle["paths"]
     assert bundle["paths"][0]["label"] == "Nodule @ Right upper lobe"
     assert bundle["paths"][0]["triples"][0] == "Image[IMG_123] -HAS_FINDING-> Finding[F1]"
     assert bundle["facts"]["image_id"] == "IMG_123"
     assert len(bundle["facts"]["findings"]) == 2
+    assert bundle["slot_limits"] == {"findings": 2, "reports": 0, "similarity": 0}
 
 
 def test_build_bundle_reduces_k_when_context_too_long():
@@ -124,6 +126,10 @@ def test_build_bundle_reduces_k_when_context_too_long():
     assert len(bundle["paths"]) <= 1
     if bundle["paths"]:
         assert bundle["paths"][0]["label"] == "Nodule @ Right upper lobe"
+    # ensure slot allocations shrink with k
+    assert repo.path_kwargs[0]["k_slots"]["findings"] == 2
+    assert repo.path_kwargs[1]["k_slots"]["findings"] == 1
+    assert repo.path_kwargs[2]["k_slots"]["findings"] == 0
 
 
 def test_build_prompt_context_json_mode_skips_path_fetch():
@@ -156,3 +162,28 @@ def test_context_pack_builder_returns_dataclass():
     assert len(pack.evidence_paths) == 1
     assert pack.evidence_paths[0].label == "Nodule @ Right upper lobe"
     assert pack.facts.image_id == "IMG_123"
+    assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 0, "similarity": 0}
+
+
+def test_build_bundle_deduplicates_path_rows():
+    duplicate_path = {
+        "label": "Nodule @ Right upper lobe",
+        "triples": [
+            "Image[IMG_123] -HAS_FINDING-> Finding[F1]",
+            "Finding[F1] -LOCATED_IN-> Anatomy[Lung-RUL]",
+        ],
+        "score": 0.95,
+    }
+    repo = DummyRepo(
+        bundle=_base_bundle(),
+        paths_by_k={
+            2: [duplicate_path, duplicate_path],
+            1: [duplicate_path],
+        },
+    )
+    builder = GraphContextBuilder(repo=repo)
+
+    bundle = builder.build_bundle("IMG_123", k=2)
+
+    assert len(bundle["paths"]) == 1
+    assert bundle["paths"][0]["triples"][0] == duplicate_path["triples"][0]

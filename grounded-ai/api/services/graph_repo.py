@@ -33,12 +33,24 @@ PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
 WITH $image AS img
-OPTIONAL MATCH (existing:Image {storage_uri: img.storage_uri})
-WITH coalesce(existing.image_id, img.image_id) AS resolved_id, img
+WITH img,
+     CASE
+         WHEN img.storage_uri IS NULL OR trim(img.storage_uri) = '' THEN NULL
+         ELSE trim(img.storage_uri)
+     END AS storage_uri
+CALL {
+  WITH storage_uri
+  WITH storage_uri WHERE storage_uri IS NOT NULL
+  MATCH (existing:Image {storage_uri: storage_uri})
+  RETURN existing
+}
+WITH img, storage_uri, existing
+WITH img, storage_uri,
+     coalesce(existing.image_id, img.image_id) AS resolved_id
 MERGE (i:Image {image_id: resolved_id})
 SET  i.path = coalesce(img.path, i.path),
      i.modality = coalesce(img.modality, i.modality),
-     i.storage_uri = coalesce(img.storage_uri, i.storage_uri)
+     i.storage_uri = CASE WHEN storage_uri IS NULL THEN i.storage_uri ELSE storage_uri END
 WITH i, img, $report AS r
 
 WITH i, r
@@ -89,27 +101,58 @@ RETURN
 
 BUNDLE_QUERY = """
 MATCH (i:Image {image_id:$image_id})
-OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
-WITH i,
-     collect(f) AS findings,
-     count(f) AS cnt_f,
-     round(coalesce(avg(f.conf), 0.0), 2) AS avg_f
-OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(r:Report)
+CALL {
+  WITH i
+  OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
+  RETURN collect(f) AS findings,
+         count(f) AS cnt_f,
+         round(coalesce(avg(f.conf), 0.0), 2) AS avg_f
+}
+CALL {
+  WITH i
+  OPTIONAL MATCH (i)-[:HAS_FINDING]->(f_loc:Finding)-[:LOCATED_IN]->(a:Anatomy)
+  RETURN count(DISTINCT a) AS cnt_loc,
+         round(coalesce(avg(f_loc.conf), 0.0), 2) AS avg_loc
+}
+CALL {
+  WITH i
+  OPTIONAL MATCH (i)-[:HAS_FINDING]->(f_rel:Finding)-[:RELATED_TO]->(rel:Finding)
+  RETURN count(DISTINCT rel) AS cnt_rel,
+         round(coalesce(avg(f_rel.conf), 0.0), 2) AS avg_rel
+}
+CALL {
+  WITH i
+  OPTIONAL MATCH (i)-[:DESCRIBED_BY]->(r:Report)
+  RETURN count(r) AS cnt_r,
+         round(coalesce(avg(r.conf), 0.0), 2) AS avg_r
+}
+CALL {
+  WITH i
+  OPTIONAL MATCH (i)-[sim:SIMILAR_TO]->(sim_img:Image)
+  RETURN count(DISTINCT sim_img) AS cnt_sim,
+         round(coalesce(avg(sim.score), 0.0), 2) AS avg_sim
+}
 WITH i,
      findings,
      cnt_f,
      avg_f,
-     count(r) AS cnt_r,
-     round(coalesce(avg(r.conf), 0.0), 2) AS avg_r
+     cnt_loc,
+     avg_loc,
+     cnt_rel,
+     avg_rel,
+     cnt_r,
+     avg_r,
+     cnt_sim,
+     avg_sim
 WITH i,
-     (CASE
-         WHEN cnt_f = 0 THEN []
-         ELSE [{rel:'HAS_FINDING', cnt: cnt_f, avg_conf: avg_f}]
-      END) +
-     (CASE
-         WHEN cnt_r = 0 THEN []
-         ELSE [{rel:'DESCRIBED_BY', cnt: cnt_r, avg_conf: avg_r}]
-      END) AS summary,
+     findings,
+     (CASE WHEN cnt_f = 0 THEN [] ELSE [{rel:'HAS_FINDING', cnt: cnt_f, avg_conf: avg_f}] END) +
+     (CASE WHEN cnt_loc = 0 THEN [] ELSE [{rel:'LOCATED_IN', cnt: cnt_loc, avg_conf: avg_loc}] END) +
+     (CASE WHEN cnt_rel = 0 THEN [] ELSE [{rel:'RELATED_TO', cnt: cnt_rel, avg_conf: avg_rel}] END) +
+     (CASE WHEN cnt_r = 0 THEN [] ELSE [{rel:'DESCRIBED_BY', cnt: cnt_r, avg_conf: avg_r}] END) +
+     (CASE WHEN cnt_sim = 0 THEN [] ELSE [{rel:'SIMILAR_TO', cnt: cnt_sim, avg_conf: avg_sim}] END) AS summary_rows
+WITH i,
+     summary_rows,
      [f IN findings WHERE f IS NOT NULL | {
          id: f.id,
          type: f.type,
@@ -119,7 +162,7 @@ WITH i,
      }] AS finding_rows
 RETURN {
   image_id: i.image_id,
-  summary: summary,
+  summary: summary_rows,
   facts: {
     image_id: i.image_id,
     findings: finding_rows
@@ -129,42 +172,133 @@ RETURN {
 
 # Cypher query retrieving weighted top-k explanation paths for a given image.
 TOPK_PATHS_QUERY = """
-WITH $image_id AS qid, $k AS k,
+WITH $image_id AS qid,
      toFloat(coalesce($alpha_finding,0.6)) AS A,
-     toFloat(coalesce($beta_report,0.4))   AS B
+     toFloat(coalesce($beta_report,0.4))   AS B,
+     CASE
+         WHEN $k_findings IS NULL THEN toInteger(coalesce($k, 0))
+         ELSE toInteger($k_findings)
+     END AS k_findings_raw,
+     CASE
+         WHEN $k_reports IS NULL THEN toInteger(coalesce($k, 0))
+         ELSE toInteger($k_reports)
+     END AS k_reports_raw,
+     CASE
+         WHEN $k_similarity IS NULL THEN toInteger(coalesce($k, 0))
+         ELSE toInteger($k_similarity)
+     END AS k_similarity_raw
 MATCH (q:Image {image_id: qid})
-OPTIONAL MATCH (q)-[:HAS_FINDING]->(f0:Finding)
-OPTIONAL MATCH (q)-[:DESCRIBED_BY]->(r0:Report)
-OPTIONAL MATCH (q)-[sim:SIMILAR_TO]->(s:Image)
-WITH q,f0,r0,sim,s, A,B, coalesce(sim.score,0.5) AS simw
-OPTIONAL MATCH (s)-[:HAS_FINDING]->(f:Finding)
-OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-OPTIONAL MATCH (s)-[:DESCRIBED_BY]->(r:Report)
-OPTIONAL MATCH (f)-[:RELATED_TO]->(f2:Finding)
-WITH q,s,f,a,r,f2,f0,r0,simw,A,B,
-     coalesce(f.conf,0.5) AS f_conf,
-     coalesce(r.conf,0.5) AS r_conf
 WITH q,
-     (simw * (A*f_conf + B*r_conf)) AS score,
-     coalesce(f.type,'Finding') AS label,
-     [
-       CASE WHEN f0 IS NOT NULL THEN 'Image['+q.image_id+'] -HAS_FINDING-> Finding['+f0.id+']' END,
-       CASE WHEN r0 IS NOT NULL THEN 'Image['+q.image_id+'] -DESCRIBED_BY-> Report['+r0.id+']' END,
-       'Image['+q.image_id+'] -SIMILAR_TO-> Image['+coalesce(s.image_id,'?')+']',
-       CASE WHEN f IS NOT NULL  THEN 'Image['+coalesce(s.image_id,'?')+'] -HAS_FINDING-> Finding['+f.id+']' END,
-       CASE WHEN a IS NOT NULL  THEN 'Finding['+coalesce(f.id,'?')+'] -LOCATED_IN-> Anatomy['+a.code+']' END,
-       CASE WHEN r IS NOT NULL  THEN 'Image['+coalesce(s.image_id,'?')+'] -DESCRIBED_BY-> Report['+r.id+']' END,
-       CASE WHEN f2 IS NOT NULL THEN 'Finding['+coalesce(f.id,'?')+'] -RELATED_TO-> Finding['+f2.id+']' END
-     ] AS raw_triples
-WITH {label:label, score:score, triples:[t IN raw_triples WHERE t IS NOT NULL]} AS path
-WITH collect(path) AS all
-UNWIND all AS p
-WITH p.label AS label, p.triples AS triples, p.score AS score
-WHERE size(triples) > 0
-WITH label, triples, score
-ORDER BY score DESC
-WITH collect({label:label, triples:triples, score:score})[0..$k] AS ranked
-RETURN ranked AS paths;
+     CASE WHEN k_findings_raw < 0 THEN 0 ELSE k_findings_raw END AS k_findings,
+     CASE WHEN k_reports_raw < 0 THEN 0 ELSE k_reports_raw END AS k_reports,
+     CASE WHEN k_similarity_raw < 0 THEN 0 ELSE k_similarity_raw END AS k_similarity,
+     A,
+     B
+CALL {
+  WITH q, k_findings
+  OPTIONAL MATCH (q)-[:HAS_FINDING]->(f:Finding)
+  WHERE f IS NOT NULL
+  WITH q, f
+  ORDER BY coalesce(f.conf, 0.0) DESC, f.id
+  WITH q, collect(f) AS f_list, k_findings
+  WITH q,
+       CASE WHEN k_findings <= 0 THEN [] ELSE f_list[0..k_findings - 1] END AS trimmed
+  UNWIND trimmed AS f
+  OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
+  OPTIONAL MATCH (f)-[:RELATED_TO]->(rel:Finding)
+  WITH q, f,
+       head([node IN collect(DISTINCT a) WHERE node IS NOT NULL]) AS loc_anatomy,
+       head([node IN collect(DISTINCT rel) WHERE node IS NOT NULL]) AS related_finding
+  WITH {
+    label: coalesce(f.type, 'Finding'),
+    score: coalesce(f.conf, 0.5),
+    triples: [
+      'Image['+q.image_id+'] -HAS_FINDING-> Finding['+coalesce(f.id,'?')+']',
+      CASE WHEN loc_anatomy IS NOT NULL THEN 'Finding['+coalesce(f.id,'?')+'] -LOCATED_IN-> Anatomy['+coalesce(loc_anatomy.code,'?')+']' END,
+      CASE WHEN related_finding IS NOT NULL THEN 'Finding['+coalesce(f.id,'?')+'] -RELATED_TO-> Finding['+coalesce(related_finding.id,'?')+']' END
+    ]
+  } AS path
+  RETURN collect(path) AS finding_paths
+}
+CALL {
+  WITH q, k_reports
+  OPTIONAL MATCH (q)-[:DESCRIBED_BY]->(r:Report)
+  WHERE r IS NOT NULL
+  WITH q, r
+  ORDER BY coalesce(r.conf, 0.0) DESC, r.id
+  WITH q, collect(r) AS r_list, k_reports
+  WITH q,
+       CASE WHEN k_reports <= 0 THEN [] ELSE r_list[0..k_reports - 1] END AS trimmed
+  UNWIND trimmed AS r
+  OPTIONAL MATCH (r)-[:MENTIONS]->(mention)
+  WITH q, r,
+       head([node IN collect(DISTINCT mention) WHERE node IS NOT NULL]) AS mention_node
+  WITH q, r, mention_node,
+       CASE WHEN mention_node IS NULL THEN [] ELSE labels(mention_node) END AS mention_labels
+  WITH q, r, mention_node, mention_labels,
+       CASE
+         WHEN mention_node IS NULL THEN NULL
+         WHEN 'Finding' IN mention_labels THEN 'Report['+coalesce(r.id,'?')+'] -MENTIONS-> Finding['+coalesce(mention_node.id,'?')+']'
+         WHEN 'Anatomy' IN mention_labels THEN 'Report['+coalesce(r.id,'?')+'] -MENTIONS-> Anatomy['+coalesce(mention_node.code,'?')+']'
+         ELSE 'Report['+coalesce(r.id,'?')+'] -MENTIONS-> '+coalesce(head(mention_labels),'Entity')+'['+coalesce(toString(mention_node.id), toString(mention_node.code), toString(mention_node.name), '?')+']'
+       END AS mention_triple,
+       CASE WHEN mention_node IS NULL THEN 0.45 ELSE 0.55 END AS mention_boost
+  WITH {
+    label: 'Report['+coalesce(r.id,'?')+']',
+    score: coalesce(r.conf, 0.4) * mention_boost,
+    triples: [
+      'Image['+q.image_id+'] -DESCRIBED_BY-> Report['+coalesce(r.id,'?')+']',
+      mention_triple
+    ]
+  } AS path
+  RETURN collect(path) AS report_paths
+}
+CALL {
+  WITH q, k_similarity, A, B
+  OPTIONAL MATCH (q)-[sim:SIMILAR_TO]->(s:Image)
+  WHERE sim IS NOT NULL AND s IS NOT NULL
+  WITH q, sim, s
+  ORDER BY coalesce(sim.score, 0.0) DESC, s.image_id
+  WITH q, A, B, collect({rel: sim, img: s}) AS sim_list, k_similarity
+  WITH q, A, B,
+       CASE WHEN k_similarity <= 0 THEN [] ELSE sim_list[0..k_similarity - 1] END AS trimmed
+  UNWIND trimmed AS entry
+  WITH q, A, B, entry.rel AS sim_rel, entry.img AS sim_image
+  OPTIONAL MATCH (sim_image)-[:HAS_FINDING]->(sf:Finding)
+  OPTIONAL MATCH (sf)-[:LOCATED_IN]->(an:Anatomy)
+  OPTIONAL MATCH (sim_image)-[:DESCRIBED_BY]->(sr:Report)
+  WITH q, A, B, sim_rel, sim_image,
+       head([node IN collect(DISTINCT sf) WHERE node IS NOT NULL]) AS primary_finding,
+       head([node IN collect(DISTINCT an) WHERE node IS NOT NULL]) AS primary_anatomy,
+       head([node IN collect(DISTINCT sr) WHERE node IS NOT NULL]) AS primary_report
+  WITH q, sim_rel, sim_image, primary_finding, primary_anatomy, primary_report,
+       CASE WHEN primary_finding IS NULL THEN 0.5 ELSE coalesce(primary_finding.conf, 0.5) END AS finding_conf,
+       CASE WHEN primary_report IS NULL THEN 0.4 ELSE coalesce(primary_report.conf, 0.4) END AS report_conf,
+       A,
+       B
+  WITH {
+    label: 'Similar['+coalesce(sim_image.image_id,'?')+']',
+    score: coalesce(sim_rel.score, 0.0) * (A * finding_conf + B * report_conf),
+    triples: [
+      'Image['+q.image_id+'] -SIMILAR_TO-> Image['+coalesce(sim_image.image_id,'?')+']',
+      CASE WHEN primary_finding IS NOT NULL THEN 'Image['+coalesce(sim_image.image_id,'?')+'] -HAS_FINDING-> Finding['+coalesce(primary_finding.id,'?')+']' END,
+      CASE WHEN primary_anatomy IS NOT NULL THEN 'Finding['+coalesce(primary_finding.id,'?')+'] -LOCATED_IN-> Anatomy['+coalesce(primary_anatomy.code,'?')+']' END,
+      CASE WHEN primary_report IS NOT NULL THEN 'Image['+coalesce(sim_image.image_id,'?')+'] -DESCRIBED_BY-> Report['+coalesce(primary_report.id,'?')+']' END
+    ]
+  } AS path
+  RETURN collect(path) AS similarity_paths
+}
+WITH finding_paths + report_paths + similarity_paths AS raw_paths
+UNWIND raw_paths AS path
+WITH path
+WHERE any(triple IN path.triples WHERE triple IS NOT NULL)
+WITH path
+ORDER BY path.score DESC
+RETURN collect({
+  label: path.label,
+  triples: [triple IN path.triples WHERE triple IS NOT NULL],
+  score: path.score
+}) AS paths;
 """
 
 SIMILARITY_CANDIDATES_QUERY = """
@@ -341,12 +475,34 @@ class GraphRepo:
         *,
         alpha_finding: Optional[float] = None,
         beta_report: Optional[float] = None,
+        k_slots: Optional[Dict[str, int]] = None,
     ) -> List[Dict[str, Any]]:
+        try:
+            k_value = int(k)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("k must be an integer") from exc
+        k_value = max(k_value, 0)
+
+        def _slot_value(key: str) -> Optional[int]:
+            if not k_slots:
+                return None
+            raw_value = k_slots.get(key)
+            if raw_value is None:
+                return None
+            try:
+                slot_int = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"k_slots[{key}] must be an integer") from exc
+            return max(slot_int, 0)
+
         params = {
             "image_id": image_id,
-            "k": k,
+            "k": k_value,
             "alpha_finding": PATH_SCORE_ALPHA_FINDING if alpha_finding is None else alpha_finding,
             "beta_report": PATH_SCORE_BETA_REPORT if beta_report is None else beta_report,
+            "k_findings": _slot_value("findings"),
+            "k_reports": _slot_value("reports"),
+            "k_similarity": _slot_value("similarity"),
         }
         records = self._run_read(TOPK_PATHS_QUERY, params)
         if not records:
