@@ -132,6 +132,53 @@ K="${2:-2}"         # top-k paths
 MAXC="${3:-120}"    # max_chars for triples
 IMG="${4:-/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png}"
 
+# Resolve image path so the API can read it from the host filesystem.
+resolve_image_path() {
+  local candidate="$1"
+  if [ -f "${candidate}" ]; then
+    printf '%s' "${candidate}"
+    return 0
+  fi
+
+  # Allow paths relative to the project root (useful on host installations).
+  if [ -f "${PROJECT_ROOT}/${candidate}" ]; then
+    printf '%s' "${PROJECT_ROOT}/${candidate}"
+    return 0
+  fi
+
+  # Map container-style paths (/data/...) to the checked-in dataset under grounded-ai/data/...
+  if [[ "${candidate}" == /data/* || "${candidate}" == /mnt/data/* ]]; then
+    local transformed="${PROJECT_ROOT}/grounded-ai${candidate}"
+    if [ -f "${transformed}" ]; then
+      printf '%s' "${transformed}"
+      return 0
+    fi
+    transformed="${PROJECT_ROOT}/grounded-ai/${candidate#/}"
+    if [ -f "${transformed}" ]; then
+      printf '%s' "${transformed}"
+      return 0
+    fi
+  fi
+
+  # On WSL, convert Windows-style paths automatically.
+  if command -v wslpath >/dev/null 2>&1; then
+    local maybe_wsl
+    maybe_wsl="$(wslpath -u "${candidate}" 2>/dev/null || true)"
+    if [ -n "${maybe_wsl}" ] && [ -f "${maybe_wsl}" ]; then
+      printf '%s' "${maybe_wsl}"
+      return 0
+    fi
+  fi
+
+  printf '%s' "${candidate}"
+  return 0
+}
+
+IMG="$(resolve_image_path "${IMG}")"
+if [ ! -f "${IMG}" ]; then
+  die "image file not found at '${IMG}'. Pass an absolute path accessible to the API process."
+fi
+
 echo "[*] Resetting Neo4j database before loading ${DATASET}..."
 run_cypher -u neo4j -p test1234 "MATCH (n) DETACH DELETE n;"
 
@@ -157,41 +204,54 @@ echo "[*] Running sanity cypher (top 3 images by findings)..."
 run_cypher -u neo4j -p test1234 "MATCH (i:Image)-[:HAS_FINDING]->(f) RETURN i.image_id, count(f) AS c ORDER BY c DESC LIMIT 3;"
 
 echo "[*] Calling /pipeline/analyze ..."
-RESPONSE=$(curl -s -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
+RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}\n" -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg fp "${IMG}" --argjson k ${K} --argjson mc ${MAXC} \
         '{case_id:"C_CONS", file_path:$fp, modes:["V","VL","VGL"], k:$k, max_chars:$mc, fallback_to_vl:true}')")
+
+HTTP_CODE=$(printf '%s' "${RESPONSE}" | awk -F: '/HTTP_STATUS/ {print $2}' | tr -d '\r')
+RESPONSE_BODY=$(printf '%s' "${RESPONSE}" | sed '$d')
+
+if [ -z "${HTTP_CODE}" ]; then
+  die "failed to reach http://localhost:8000/pipeline/analyze"
+fi
+
+if [ "${HTTP_CODE}" -ge 400 ]; then
+  echo "[!] /pipeline/analyze returned ${HTTP_CODE}" >&2
+  printf '%s\n' "${RESPONSE_BODY}" >&2
+  exit 1
+fi
 
 # 1️⃣ 전체 응답 저장 (디버그용)
 LOG_DIR="${SCRIPT_DIR}/../logs"
 mkdir -p "${LOG_DIR}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTFILE="${LOG_DIR}/run_${DATASET}_${TIMESTAMP}.json"
-echo "$RESPONSE" > "$OUTFILE"
+printf '%s\n' "${RESPONSE_BODY}" > "$OUTFILE"
 
 # 2️⃣ 핵심 요약 정보 출력
 echo "========== SUMMARY =========="
-echo "$RESPONSE" | jq -r '.graph_context.summary[]'
-AGREEMENT="$(echo "$RESPONSE" | jq -r '.results.consensus.agreement_score')"
-STATUS="$(echo "$RESPONSE" | jq -r '.results.consensus.status')"
-CONFIDENCE="$(echo "$RESPONSE" | jq -r '.results.consensus.confidence')"
-CTX_PATHS="$(echo "$RESPONSE" | jq -r '.debug.context_paths_len')"
+echo "$RESPONSE_BODY" | jq -r '.graph_context.summary[]'
+AGREEMENT="$(echo "$RESPONSE_BODY" | jq -r '.results.consensus.agreement_score')"
+STATUS="$(echo "$RESPONSE_BODY" | jq -r '.results.consensus.status')"
+CONFIDENCE="$(echo "$RESPONSE_BODY" | jq -r '.results.consensus.confidence')"
+CTX_PATHS="$(echo "$RESPONSE_BODY" | jq -r '.debug.context_paths_len')"
 
 echo "agreement_score: ${AGREEMENT}"
 echo "status:          ${STATUS}"
 echo "confidence:      ${CONFIDENCE}"
 echo "ctx_paths_len:   ${CTX_PATHS}"
-echo "context_summary: $(echo "$RESPONSE" | jq -r '.debug.context_summary | join(" | ")')"
+echo "context_summary: $(echo "$RESPONSE_BODY" | jq -r '.debug.context_summary | join(" | ")')"
 
 SUMMARY_FILE="${LOG_DIR}/summary.csv"
 echo "${TIMESTAMP},${DATASET},${AGREEMENT},${STATUS},${CONFIDENCE},${CTX_PATHS}" >> "${SUMMARY_FILE}"
 
 # 3️⃣ 세부 결과 블록
 echo "---------- Consensus ----------"
-echo "$RESPONSE" | jq '.results.consensus'
+echo "$RESPONSE_BODY" | jq '.results.consensus'
 echo "---------- Debug Consensus ----------"
-echo "$RESPONSE" | jq '.debug.consensus'
+echo "$RESPONSE_BODY" | jq '.debug.consensus'
 echo "---------- Findings (Facts) ----------"
-echo "$RESPONSE" | jq '.graph_context.facts.findings'
+echo "$RESPONSE_BODY" | jq '.graph_context.facts.findings'
 echo "---------- Evidence Paths ----------"
-echo "$RESPONSE" | jq '.debug.context_paths_head'
+echo "$RESPONSE_BODY" | jq '.debug.context_paths_head'

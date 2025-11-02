@@ -210,6 +210,7 @@ CALL {
        head([node IN collect(DISTINCT a) WHERE node IS NOT NULL]) AS loc_anatomy,
        head([node IN collect(DISTINCT rel) WHERE node IS NOT NULL]) AS related_finding
   WITH {
+    slot: 'findings',
     label: coalesce(f.type, 'Finding'),
     score: coalesce(f.conf, 0.5),
     triples: [
@@ -244,6 +245,7 @@ CALL {
        END AS mention_triple,
        CASE WHEN mention_node IS NULL THEN 0.45 ELSE 0.55 END AS mention_boost
   WITH {
+    slot: 'reports',
     label: 'Report['+coalesce(r.id,'?')+']',
     score: coalesce(r.conf, 0.4) * mention_boost,
     triples: [
@@ -277,6 +279,7 @@ CALL {
        A,
        B
   WITH {
+    slot: 'similarity',
     label: 'Similar['+coalesce(sim_image.image_id,'?')+']',
     score: coalesce(sim_rel.score, 0.0) * (A * finding_conf + B * report_conf),
     triples: [
@@ -295,6 +298,7 @@ WHERE any(triple IN path.triples WHERE triple IS NOT NULL)
 WITH path
 ORDER BY path.score DESC
 RETURN collect({
+  slot: path.slot,
   label: path.label,
   triples: [triple IN path.triples WHERE triple IS NOT NULL],
   score: path.score

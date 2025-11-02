@@ -2,7 +2,7 @@
 
 | Requirement | Description                         | Current Status | Notes |
 |-------------|-------------------------------------|----------------|-------|
-| R1          | Graph context coverage              | In Progress    | TOPK_PATHS_QUERY 다중 패턴 + ContextPack dedup (graph_repo.py, context_pack.py) |
+| R1          | Graph context coverage              | Completed      | slot 재분배 + 다중 패턴 경로 재구성 (graph_repo.py, context_pack.py) |
 | R2          | Image upsert idempotency            | In Progress    | storage_uri 우선 MERGE 적용 (graph_repo.py#UPSERT_CASE_QUERY) |
 | R3          | Consensus & language hygiene        | Pending        |  |
 | R4          | Evidence summary completeness       | In Progress    | SUMMARY 관계 확장 및 slot_limits 반환 (graph_repo.py, context_pack.py) |

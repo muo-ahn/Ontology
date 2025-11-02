@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator
 from .graph_repo import GraphRepo
 
 
+_PATH_SLOT_KEYS: Sequence[str] = ("findings", "reports", "similarity")
+
+
 def json_dumps_safe(obj: Any, *, indent: int = 2) -> str:
     """Serialise objects to JSON while keeping UTF-8 characters."""
     return json.dumps(obj, ensure_ascii=False, indent=indent)
@@ -33,16 +36,30 @@ def _format_edge_summary(rows: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(_render_edge_summary_lines(rows))
 
 
+def _categorise_path_slot(row: Dict[str, Any]) -> str:
+    slot = str(row.get("slot") or row.get("category") or "").strip().lower()
+    if slot in _PATH_SLOT_KEYS:
+        return slot
+    triples = row.get("triples") or []
+    for triple in triples:
+        fragment = str(triple)
+        if "SIMILAR_TO" in fragment:
+            return "similarity"
+        if "DESCRIBED_BY" in fragment or "MENTIONS" in fragment:
+            return "reports"
+        if "HAS_FINDING" in fragment:
+            return "findings"
+    return ""
+
+
 def _build_evidence_paths(paths: Sequence[Dict[str, Any]]) -> List["EvidencePath"]:
     evidence_paths: List[EvidencePath] = []
     for path in paths:
         label = path.get("label") or ""
         triples = path.get("triples") or []
-        evidence_paths.append(EvidencePath(label=label, triples=list(triples)))
+        slot = _categorise_path_slot(path) or None
+        evidence_paths.append(EvidencePath(label=label, triples=list(triples), slot=slot))
     return evidence_paths
-
-
-_PATH_SLOT_KEYS: Sequence[str] = ("findings", "reports", "similarity")
 
 
 def _sanitise_slot_values(explicit: Optional[Dict[str, int]]) -> Dict[str, int]:
@@ -114,12 +131,42 @@ def _dedupe_path_rows(paths: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
+        slot = _categorise_path_slot(row) or None
         deduped.append({
             "label": label,
             "triples": list(triples),
             "score": row.get("score"),
+            "slot": slot,
         })
     return deduped
+
+
+def _rebalance_slot_limits(slots: Dict[str, int], paths: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    total = sum(max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
+    if total <= 0:
+        return slots
+
+    counts: Dict[str, int] = {key: 0 for key in _PATH_SLOT_KEYS}
+    for row in paths:
+        slot = _categorise_path_slot(row)
+        if slot in counts:
+            counts[slot] += 1
+
+    present = [key for key in _PATH_SLOT_KEYS if slots.get(key, 0) > 0 and counts.get(key, 0) > 0]
+    if not present:
+        present = [key for key in _PATH_SLOT_KEYS if slots.get(key, 0) > 0]
+    if not present:
+        return slots
+
+    base = total // len(present)
+    remainder = total % len(present)
+    rebalanced = {key: 0 for key in _PATH_SLOT_KEYS}
+    for key in present:
+        allocation = base + (1 if remainder > 0 else 0)
+        rebalanced[key] = allocation
+        if remainder > 0:
+            remainder -= 1
+    return rebalanced
 
 
 class GraphContextBuilder:
@@ -206,8 +253,15 @@ class GraphContextBuilder:
         paths_rows: Sequence[Dict[str, Any]] = []
         rendered_bundle: Dict[str, Any] = {}
         final_slot_limits: Dict[str, int] = {}
+        slot_limits = _resolve_path_slots(current_k, slot_overrides)
+        attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
+        deduped_rows: List[Dict[str, Any]] = []
         while True:
-            slot_limits = _resolve_path_slots(current_k, slot_overrides)
+            slot_signature = tuple((key, int(slot_limits.get(key, 0))) for key in _PATH_SLOT_KEYS)
+            if slot_signature in attempted_slot_configs:
+                break
+            attempted_slot_configs.add(slot_signature)
+
             raw_paths = self._repo.query_paths(
                 image_id,
                 current_k,
@@ -216,13 +270,27 @@ class GraphContextBuilder:
                 k_slots=slot_limits,
             )
             paths_rows = _dedupe_path_rows(raw_paths)
+
+            total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
+            desired_paths = total_budget if current_k <= 0 else min(current_k, total_budget or current_k)
+            if (
+                not slot_overrides
+                and desired_paths > 0
+                and len(paths_rows) < desired_paths
+            ):
+                rebalanced = _rebalance_slot_limits(slot_limits, paths_rows)
+                if rebalanced != slot_limits:
+                    slot_limits = rebalanced
+                    continue
+
             rendered = _render(paths_rows)
             triples_text = rendered["triples_text"]
             if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
-                if current_k == 0:
-                    break
                 current_k -= 1
+                slot_limits = _resolve_path_slots(current_k, slot_overrides)
+                attempted_slot_configs.clear()
                 continue
+
             rendered_bundle = rendered
             final_slot_limits = slot_limits
             break
@@ -234,7 +302,11 @@ class GraphContextBuilder:
 
         summary_lines = [line for line in _render_edge_summary_lines(summary_rows) if line]
         paths_payload = [
-            {"label": path.label, "triples": path.triples}
+            {
+                "label": path.label,
+                "triples": path.triples,
+                "slot": path.slot,
+            }
             for path in rendered_bundle.get("evidence_paths", [])
         ]
 
@@ -252,7 +324,8 @@ class GraphContextBuilder:
             lines.append("데이터 없음")
             return "\n".join(lines)
         for idx, path in enumerate(paths, start=1):
-            lines.append(f"{idx}) {path.label}")
+            slot_prefix = f"[{path.slot}] " if path.slot else ""
+            lines.append(f"{idx}) {slot_prefix}{path.label}")
             for triple in path.triples:
                 lines.append(f"   {triple}")
         return "\n".join(lines)
@@ -263,6 +336,7 @@ class EvidencePath(BaseModel):
 
     label: str
     triples: List[str] = Field(default_factory=list)
+    slot: Optional[str] = None
 
 
 class ContextFacts(BaseModel):
@@ -314,8 +388,29 @@ class ContextPackBuilder:
 
         edge_summary = _format_edge_summary(summary_rows)
         slot_limits = _resolve_path_slots(k_value, k_slots)
-        path_rows = self._repo.query_paths(image_id, k_value, k_slots=slot_limits)
-        evidence_paths = _build_evidence_paths(_dedupe_path_rows(path_rows))
+        attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
+        while True:
+            slot_signature = tuple((key, int(slot_limits.get(key, 0))) for key in _PATH_SLOT_KEYS)
+            if slot_signature in attempted_slot_configs:
+                break
+            attempted_slot_configs.add(slot_signature)
+
+            path_rows = self._repo.query_paths(image_id, k_value, k_slots=slot_limits)
+            deduped_rows = _dedupe_path_rows(path_rows)
+            total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
+            desired_paths = total_budget if k_value <= 0 else min(k_value, total_budget or k_value)
+            if (
+                not k_slots
+                and desired_paths > 0
+                and len(deduped_rows) < desired_paths
+            ):
+                rebalanced = _rebalance_slot_limits(slot_limits, deduped_rows)
+                if rebalanced != slot_limits:
+                    slot_limits = rebalanced
+                    continue
+            break
+
+        evidence_paths = _build_evidence_paths(deduped_rows)
 
         return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
 

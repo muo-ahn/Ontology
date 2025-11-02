@@ -57,6 +57,35 @@ class DummyRepo:
         return payload
 
 
+class SlotAwareRepo(DummyRepo):
+    """Repo variant that honours k-slot requests to simulate rebalancing behaviour."""
+
+    def __init__(
+        self,
+        bundle: Dict[str, object],
+        finding_pool: List[Dict[str, object]],
+        report_pool: List[Dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__(bundle=bundle, paths_by_k={})
+        self._finding_pool = finding_pool
+        self._report_pool = report_pool or []
+
+    def query_paths(self, image_id: str, k: int, **kwargs: Any) -> List[Dict[str, object]]:
+        self.path_calls.append(k)
+        params = dict(kwargs)
+        self.path_kwargs.append(params)
+        slots = params.get("k_slots") or {}
+        payload: List[Dict[str, object]] = []
+        finding_limit = max(int(slots.get("findings", 0)), 0)
+        report_limit = max(int(slots.get("reports", 0)), 0)
+
+        for idx in range(min(finding_limit, len(self._finding_pool))):
+            payload.append(deepcopy(self._finding_pool[idx]))
+        for idx in range(min(report_limit, len(self._report_pool))):
+            payload.append(deepcopy(self._report_pool[idx]))
+        return payload
+
+
 def _base_bundle(image_id: str = "IMG_123") -> Dict[str, object]:
     return {
         "summary": [{"rel": "HAS_FINDING", "cnt": 2, "avg_conf": 0.8}],
@@ -78,6 +107,7 @@ def _paths_payload(long_tail: bool = False) -> Dict[int, List[Dict[str, object]]
             "Finding[F1] -LOCATED_IN-> Anatomy[Lung-RUL]",
         ],
         "score": 0.91,
+        "slot": "findings",
     }
     if not long_tail:
         return {2: [base_path], 1: [base_path]}
@@ -89,6 +119,7 @@ def _paths_payload(long_tail: bool = False) -> Dict[int, List[Dict[str, object]]
             long_triple,
         ],
         "score": 0.77,
+        "slot": "findings",
     }
     return {
         2: [base_path, extended_path],
@@ -110,6 +141,7 @@ def test_build_bundle_includes_evidence_paths():
     assert bundle["paths"]
     assert bundle["paths"][0]["label"] == "Nodule @ Right upper lobe"
     assert bundle["paths"][0]["triples"][0] == "Image[IMG_123] -HAS_FINDING-> Finding[F1]"
+    assert bundle["paths"][0]["slot"] == "findings"
     assert bundle["facts"]["image_id"] == "IMG_123"
     assert len(bundle["facts"]["findings"]) == 2
     assert bundle["slot_limits"] == {"findings": 2, "reports": 0, "similarity": 0}
@@ -162,6 +194,7 @@ def test_context_pack_builder_returns_dataclass():
     assert len(pack.evidence_paths) == 1
     assert pack.evidence_paths[0].label == "Nodule @ Right upper lobe"
     assert pack.facts.image_id == "IMG_123"
+    assert pack.evidence_paths[0].slot == "findings"
     assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 0, "similarity": 0}
 
 
@@ -173,6 +206,7 @@ def test_build_bundle_deduplicates_path_rows():
             "Finding[F1] -LOCATED_IN-> Anatomy[Lung-RUL]",
         ],
         "score": 0.95,
+        "slot": "findings",
     }
     repo = DummyRepo(
         bundle=_base_bundle(),
@@ -187,3 +221,48 @@ def test_build_bundle_deduplicates_path_rows():
 
     assert len(bundle["paths"]) == 1
     assert bundle["paths"][0]["triples"][0] == duplicate_path["triples"][0]
+
+
+def test_build_bundle_rebalances_slots_when_reports_absent():
+    finding_pool = [
+        {
+            "label": f"Finding path {idx}",
+            "triples": [f"Image[IMG_123] -HAS_FINDING-> Finding[F{idx}]"],
+            "score": 0.9 - idx * 0.02,
+            "slot": "findings",
+        }
+        for idx in range(1, 6)
+    ]
+    repo = SlotAwareRepo(bundle=_base_bundle(), finding_pool=finding_pool)
+    builder = GraphContextBuilder(repo=repo)
+
+    bundle = builder.build_bundle("IMG_123", k=4)
+
+    assert repo.path_calls == [4, 4]
+    assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 2, "similarity": 0}
+    assert repo.path_kwargs[1]["k_slots"] == {"findings": 4, "reports": 0, "similarity": 0}
+    assert len(bundle["paths"]) == 4
+    assert all(path["slot"] == "findings" for path in bundle["paths"])
+    assert bundle["slot_limits"] == {"findings": 4, "reports": 0, "similarity": 0}
+
+
+def test_context_pack_builder_rebalances_slots():
+    finding_pool = [
+        {
+            "label": f"Finding path {idx}",
+            "triples": [f"Image[IMG_123] -HAS_FINDING-> Finding[F{idx}]"],
+            "score": 0.8,
+            "slot": "findings",
+        }
+        for idx in range(1, 5)
+    ]
+    repo = SlotAwareRepo(bundle=_base_bundle(), finding_pool=finding_pool)
+    builder = ContextPackBuilder(repo=repo, top_k_paths=4)
+
+    pack = builder.build("IMG_123")
+
+    assert repo.path_calls == [4, 4]
+    assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 2, "similarity": 0}
+    assert repo.path_kwargs[1]["k_slots"] == {"findings": 4, "reports": 0, "similarity": 0}
+    assert len(pack.evidence_paths) == 4
+    assert all(path.slot == "findings" for path in pack.evidence_paths)
