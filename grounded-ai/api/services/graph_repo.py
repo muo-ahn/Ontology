@@ -198,10 +198,10 @@ CALL {
   WITH q, k_findings
   OPTIONAL MATCH (q)-[:HAS_FINDING]->(f:Finding)
   WHERE f IS NOT NULL
-  WITH q, f
+  WITH q, k_findings, f
   ORDER BY coalesce(f.conf, 0.0) DESC, f.id
-  WITH q, collect(f) AS f_list, k_findings
-  WITH q,
+  WITH q, k_findings, collect(f) AS f_list
+  WITH q, k_findings,
        CASE WHEN k_findings <= 0 THEN [] ELSE f_list[0..k_findings - 1] END AS trimmed
   UNWIND trimmed AS f
   OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
@@ -225,10 +225,10 @@ CALL {
   WITH q, k_reports
   OPTIONAL MATCH (q)-[:DESCRIBED_BY]->(r:Report)
   WHERE r IS NOT NULL
-  WITH q, r
+  WITH q, k_reports, r
   ORDER BY coalesce(r.conf, 0.0) DESC, r.id
-  WITH q, collect(r) AS r_list, k_reports
-  WITH q,
+  WITH q, k_reports, collect(r) AS r_list
+  WITH q, k_reports,
        CASE WHEN k_reports <= 0 THEN [] ELSE r_list[0..k_reports - 1] END AS trimmed
   UNWIND trimmed AS r
   OPTIONAL MATCH (r)-[:MENTIONS]->(mention)
@@ -259,10 +259,10 @@ CALL {
   WITH q, k_similarity, A, B
   OPTIONAL MATCH (q)-[sim:SIMILAR_TO]->(s:Image)
   WHERE sim IS NOT NULL AND s IS NOT NULL
-  WITH q, sim, s
+  WITH q, k_similarity, A, B, sim, s
   ORDER BY coalesce(sim.score, 0.0) DESC, s.image_id
-  WITH q, A, B, collect({rel: sim, img: s}) AS sim_list, k_similarity
-  WITH q, A, B,
+  WITH q, k_similarity, A, B, collect({rel: sim, img: s}) AS sim_list
+  WITH q, k_similarity, A, B,
        CASE WHEN k_similarity <= 0 THEN [] ELSE sim_list[0..k_similarity - 1] END AS trimmed
   UNWIND trimmed AS entry
   WITH q, A, B, entry.rel AS sim_rel, entry.img AS sim_image

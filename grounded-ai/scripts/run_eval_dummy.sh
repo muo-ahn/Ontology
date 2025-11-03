@@ -174,10 +174,42 @@ resolve_image_path() {
   return 0
 }
 
-IMG="$(resolve_image_path "${IMG}")"
-if [ ! -f "${IMG}" ]; then
-  die "image file not found at '${IMG}'. Pass an absolute path accessible to the API process."
+IMG_ARG="${IMG}"
+IMG_HOST="$(resolve_image_path "${IMG_ARG}")"
+if [ ! -f "${IMG_HOST}" ]; then
+  die "image file not found at '${IMG_HOST}'. Pass an absolute path accessible to the API process."
 fi
+
+resolve_payload_path() {
+  local original="$1"
+  local host_path="$2"
+
+  if [ "${CYPHER_MODE}" = "docker" ]; then
+    if [[ "${original}" == /data/* ]]; then
+      printf '%s' "${original}"
+      return 0
+    fi
+    if [[ "${original}" == /mnt/data/* ]]; then
+      printf '/data/%s' "${original#/mnt/data/}"
+      return 0
+    fi
+    local prefix1="${PROJECT_ROOT}/grounded-ai/data/"
+    if [[ "${host_path}" == ${prefix1}* ]]; then
+      printf '/data/%s' "${host_path#${prefix1}}"
+      return 0
+    fi
+    local prefix2="${PROJECT_ROOT}/data/"
+    if [[ "${host_path}" == ${prefix2}* ]]; then
+      printf '/data/%s' "${host_path#${prefix2}}"
+      return 0
+    fi
+  fi
+
+  printf '%s' "${host_path}"
+  return 0
+}
+
+IMG_PAYLOAD="$(resolve_payload_path "${IMG_ARG}" "${IMG_HOST}")"
 
 echo "[*] Resetting Neo4j database before loading ${DATASET}..."
 run_cypher -u neo4j -p test1234 "MATCH (n) DETACH DELETE n;"
@@ -206,7 +238,7 @@ run_cypher -u neo4j -p test1234 "MATCH (i:Image)-[:HAS_FINDING]->(f) RETURN i.im
 echo "[*] Calling /pipeline/analyze ..."
 RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}\n" -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --arg fp "${IMG}" --argjson k ${K} --argjson mc ${MAXC} \
+  -d "$(jq -n --arg fp "${IMG_PAYLOAD}" --argjson k ${K} --argjson mc ${MAXC} \
         '{case_id:"C_CONS", file_path:$fp, modes:["V","VL","VGL"], k:$k, max_chars:$mc, fallback_to_vl:true}')")
 
 HTTP_CODE=$(printf '%s' "${RESPONSE}" | awk -F: '/HTTP_STATUS/ {print $2}' | tr -d '\r')

@@ -138,6 +138,8 @@ def test_build_bundle_includes_evidence_paths():
     assert repo.path_calls == [2]
     assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 0, "similarity": 0}
     assert bundle["summary"][0] == "[EDGE SUMMARY]"
+    assert any("HAS_FINDING" in line for line in bundle["summary"])
+    assert any("LOCATED_IN" in line for line in bundle["summary"])
     assert bundle["paths"]
     assert bundle["paths"][0]["label"] == "Nodule @ Right upper lobe"
     assert bundle["paths"][0]["triples"][0] == "Image[IMG_123] -HAS_FINDING-> Finding[F1]"
@@ -223,6 +225,39 @@ def test_build_bundle_deduplicates_path_rows():
     assert bundle["paths"][0]["triples"][0] == duplicate_path["triples"][0]
 
 
+def test_summary_augmented_from_paths():
+    bundle = {
+        "summary": [],
+        "facts": {
+            "image_id": "IMG_456",
+            "findings": [
+                {"id": "F9", "conf": 0.87},
+            ],
+        },
+    }
+    path_entry = {
+        "label": "Composite evidence",
+        "triples": [
+            "Image[IMG_456] -HAS_FINDING-> Finding[F9]",
+            "Finding[F9] -LOCATED_IN-> Anatomy[AN_LIVER]",
+            "Image[IMG_456] -DESCRIBED_BY-> Report[R9]",
+            "Image[IMG_456] -SIMILAR_TO-> Image[IMG_123]",
+        ],
+        "score": 0.72,
+        "slot": "findings",
+    }
+    repo = DummyRepo(bundle=bundle, paths_by_k={2: [path_entry], 1: [path_entry]})
+    builder = GraphContextBuilder(repo=repo)
+
+    bundle_result = builder.build_bundle("IMG_456", k=2)
+
+    summary_lines = bundle_result["summary"]
+    assert any("HAS_FINDING" in line for line in summary_lines)
+    assert any("LOCATED_IN" in line for line in summary_lines)
+    assert any("DESCRIBED_BY" in line for line in summary_lines)
+    assert any("SIMILAR_TO" in line for line in summary_lines)
+
+
 def test_build_bundle_rebalances_slots_when_reports_absent():
     finding_pool = [
         {
@@ -244,6 +279,37 @@ def test_build_bundle_rebalances_slots_when_reports_absent():
     assert len(bundle["paths"]) == 4
     assert all(path["slot"] == "findings" for path in bundle["paths"])
     assert bundle["slot_limits"] == {"findings": 4, "reports": 0, "similarity": 0}
+
+
+def test_context_pack_summary_augmented_from_paths():
+    bundle = {
+        "summary": [],
+        "facts": {
+            "image_id": "IMG_789",
+            "findings": [
+                {"id": "F10", "conf": 0.93},
+            ],
+        },
+    }
+    path_entry = {
+        "label": "Augmented path",
+        "triples": [
+            "Image[IMG_789] -HAS_FINDING-> Finding[F10]",
+            "Finding[F10] -LOCATED_IN-> Anatomy[AN_HEART]",
+            "Image[IMG_789] -SIMILAR_TO-> Image[IMG_321]",
+        ],
+        "score": 0.81,
+        "slot": "findings",
+    }
+    repo = DummyRepo(bundle=bundle, paths_by_k={2: [path_entry]})
+    builder = ContextPackBuilder(repo=repo, top_k_paths=2)
+
+    pack = builder.build("IMG_789")
+
+    summary_lines = pack.edge_summary.splitlines()
+    assert any("HAS_FINDING" in line for line in summary_lines)
+    assert any("LOCATED_IN" in line for line in summary_lines)
+    assert any("SIMILAR_TO" in line for line in summary_lines)
 
 
 def test_context_pack_builder_rebalances_slots():

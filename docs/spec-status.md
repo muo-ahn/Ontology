@@ -2,11 +2,11 @@
 
 | Requirement | Description                         | Current Status | Notes |
 |-------------|-------------------------------------|----------------|-------|
-| R1          | Graph context coverage              | Completed      | slot 재분배 + 다중 패턴 경로 재구성 (graph_repo.py, context_pack.py) |
-| R2          | Image upsert idempotency            | In Progress    | storage_uri 우선 MERGE 적용 (graph_repo.py#UPSERT_CASE_QUERY) |
+| R1          | Graph context coverage              | Completed      | Slot rebalance + multi-pattern paths (graph_repo.py, context_pack.py) |
+| R2          | Image upsert idempotency            | Completed      | storage_uri-first reuse with repeated upsert test (graph_repo.py, tests/test_paths_and_analyze.py) |
 | R3          | Consensus & language hygiene        | Pending        |  |
-| R4          | Evidence summary completeness       | In Progress    | SUMMARY 관계 확장 및 slot_limits 반환 (graph_repo.py, context_pack.py) |
+| R4          | Evidence summary completeness       | In Progress    | SUMMARY relation expansion & slot_limits output (graph_repo.py, context_pack.py) |
 | R5          | Similarity exploration controls     | Pending        |  |
 | R6          | Tooling & CI enablement             | Pending        |  |
 
-> pytest grounded-ai/tests/unit/test_context_pack.py ✅; 전체 pytest 는 neo4j/redis 모듈 부재로 중단됨.
+> pytest grounded-ai/tests/unit/test_context_pack.py ✅; full pytest still requires local Neo4j/Redis modules.

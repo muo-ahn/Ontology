@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -11,6 +12,10 @@ from .graph_repo import GraphRepo
 
 
 _PATH_SLOT_KEYS: Sequence[str] = ("findings", "reports", "similarity")
+_RELATION_KEYS = {"HAS_FINDING", "LOCATED_IN", "RELATED_TO", "DESCRIBED_BY", "SIMILAR_TO"}
+_RELATION_PATTERN = re.compile(r"-\s*([A-Z_]+)\s*->")
+_FINDING_ID_PATTERN = re.compile(r"Finding\[(?P<id>[^\]]+)\]")
+_SUMMARY_REL_ORDER: Sequence[str] = ("HAS_FINDING", "LOCATED_IN", "RELATED_TO", "DESCRIBED_BY", "SIMILAR_TO")
 
 
 def json_dumps_safe(obj: Any, *, indent: int = 2) -> str:
@@ -169,6 +174,89 @@ def _rebalance_slot_limits(slots: Dict[str, int], paths: Sequence[Dict[str, Any]
     return rebalanced
 
 
+def _extract_relation(token: str) -> Optional[str]:
+    match = _RELATION_PATTERN.search(token)
+    if not match:
+        return None
+    relation = match.group(1)
+    return relation if relation in _RELATION_KEYS else None
+
+
+def _augment_summary_rows(
+    summary_rows: Sequence[Dict[str, Any]],
+    paths: Sequence[Dict[str, Any]],
+    facts_payload: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    summary_map: Dict[str, Dict[str, Any]] = {}
+    for row in summary_rows or []:
+        relation = row.get("rel") or row.get("reltype")
+        if not relation:
+            continue
+        summary_map[relation] = dict(row)
+
+    finding_conf_map: Dict[str, Optional[float]] = {}
+    if isinstance(facts_payload, dict):
+        for finding in facts_payload.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            fid = str(finding.get("id") or finding.get("finding_id") or "").strip()
+            if not fid:
+                continue
+            conf_raw = finding.get("conf")
+            try:
+                finding_conf_map[fid] = float(conf_raw) if conf_raw is not None else None
+            except (TypeError, ValueError):
+                finding_conf_map[fid] = None
+
+    fallback_counts: Dict[str, Dict[str, Any]] = {}
+    for path in paths:
+        triples = path.get("triples") or []
+        for triple in triples:
+            relation = _extract_relation(str(triple))
+            if not relation:
+                continue
+            entry = fallback_counts.setdefault(relation, {"cnt": 0, "conf": []})
+            entry["cnt"] += 1
+            confidence_value: Optional[float] = None
+            if relation == "HAS_FINDING":
+                match = _FINDING_ID_PATTERN.search(str(triple))
+                if match:
+                    confidence_value = finding_conf_map.get(match.group("id"))
+            elif relation == "SIMILAR_TO":
+                score = path.get("score")
+                try:
+                    confidence_value = float(score) if score is not None else None
+                except (TypeError, ValueError):
+                    confidence_value = None
+            if confidence_value is not None:
+                entry["conf"].append(confidence_value)
+
+    for relation, info in fallback_counts.items():
+        if relation in summary_map:
+            continue
+        if info.get("cnt", 0) <= 0:
+            continue
+        values = info.get("conf") or []
+        avg_conf = None
+        if values:
+            avg_conf = round(sum(values) / len(values), 2)
+        summary_map[relation] = {
+            "rel": relation,
+            "cnt": info["cnt"],
+            "avg_conf": avg_conf,
+        }
+
+    ordered: List[Dict[str, Any]] = []
+    for relation in _SUMMARY_REL_ORDER:
+        row = summary_map.get(relation)
+        if row:
+            ordered.append(row)
+    for relation, row in summary_map.items():
+        if relation not in _SUMMARY_REL_ORDER:
+            ordered.append(row)
+    return ordered
+
+
 class GraphContextBuilder:
     """Fetches and formats graph-derived context for LLM prompts."""
 
@@ -230,22 +318,24 @@ class GraphContextBuilder:
         facts = ContextFacts(**facts_data)
         facts_payload = facts.model_dump(mode="python")
 
-        summary_text = _format_edge_summary(summary_rows)
         current_k = max(k, 0)
         slot_overrides = dict(k_slots or {})
 
         def _render(current_paths: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+            effective_summary_rows = _augment_summary_rows(summary_rows, current_paths, facts_payload)
+            summary_text_local = _format_edge_summary(effective_summary_rows)
             evidence_paths = _build_evidence_paths(current_paths)
             evidence_section = self._format_evidence_section(evidence_paths)
             sections = [
-                summary_text,
+                summary_text_local,
                 evidence_section,
                 "[FACTS JSON]",
                 json_dumps_safe(facts_payload),
             ]
             triples_text = "\n".join(section for section in sections if section)
             return {
-                "summary_text": summary_text,
+                "summary_text": summary_text_local,
+                "summary_rows": effective_summary_rows,
                 "evidence_paths": evidence_paths,
                 "triples_text": triples_text,
             }
@@ -298,9 +388,10 @@ class GraphContextBuilder:
         triples_text = rendered_bundle.get("triples_text", "")
         if max_chars and max_chars > 0 and len(triples_text) > max_chars and hard_trim:
             trimmed = triples_text[: max_chars - 1].rstrip()
-            triples_text = f"{trimmed}…"
+            triples_text = f"{trimmed}..."
 
-        summary_lines = [line for line in _render_edge_summary_lines(summary_rows) if line]
+        final_summary_rows = rendered_bundle.get("summary_rows", summary_rows)
+        summary_lines = [line for line in _render_edge_summary_lines(final_summary_rows) if line]
         paths_payload = [
             {
                 "label": path.label,
@@ -316,6 +407,7 @@ class GraphContextBuilder:
             "facts": facts_payload,
             "triples": triples_text,
             "slot_limits": final_slot_limits,
+            "summary_rows": final_summary_rows,
         }
 
     def _format_evidence_section(self, paths: Sequence["EvidencePath"]) -> str:
@@ -386,9 +478,9 @@ class ContextPackBuilder:
         facts_payload = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
         facts = ContextFacts(**facts_payload)
 
-        edge_summary = _format_edge_summary(summary_rows)
         slot_limits = _resolve_path_slots(k_value, k_slots)
         attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
+        final_deduped_rows: List[Dict[str, Any]] = []
         while True:
             slot_signature = tuple((key, int(slot_limits.get(key, 0))) for key in _PATH_SLOT_KEYS)
             if slot_signature in attempted_slot_configs:
@@ -397,6 +489,7 @@ class ContextPackBuilder:
 
             path_rows = self._repo.query_paths(image_id, k_value, k_slots=slot_limits)
             deduped_rows = _dedupe_path_rows(path_rows)
+            final_deduped_rows = deduped_rows
             total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
             desired_paths = total_budget if k_value <= 0 else min(k_value, total_budget or k_value)
             if (
@@ -410,7 +503,10 @@ class ContextPackBuilder:
                     continue
             break
 
-        evidence_paths = _build_evidence_paths(deduped_rows)
+        facts_dump = facts.model_dump(mode="python")
+        effective_summary_rows = _augment_summary_rows(summary_rows, final_deduped_rows, facts_dump)
+        edge_summary = _format_edge_summary(effective_summary_rows)
+        evidence_paths = _build_evidence_paths(final_deduped_rows)
 
         return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
 

@@ -234,3 +234,47 @@ def test_pipeline_analyze_returns_paths_and_consensus(pipeline_app: FastAPI) -> 
     assert evaluation.get("consensus", {}).get("status") == consensus.get("status")
     assert evaluation.get("agreement_score") == pytest.approx(consensus.get("agreement_score", 0), rel=1e-3)
     assert isinstance(evaluation.get("similar_seed_images"), list)
+
+
+def test_upsert_case_idempotent_by_storage_uri() -> None:
+    repo = GraphRepo.from_env()
+    storage_uri = "/data/test/idempotent/us999.png"
+    image_id = "IDEMP_US_999"
+    payload = {
+        "image": {
+            "image_id": image_id,
+            "path": "/tmp/idempotent-us999.png",
+            "modality": "US",
+            "storage_uri": storage_uri,
+        },
+        "report": {
+            "id": "IDEMP_R_999",
+            "text": "Control case for storage_uri idempotency.",
+            "model": "dummy-llm",
+            "conf": 0.8,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+        "findings": deepcopy(_FINDINGS_FIXTURE[:1]),
+    }
+    try:
+        image_ids = []
+        for _ in range(5):
+            receipt = repo.upsert_case(payload)
+            image_ids.append(receipt.get("image_id"))
+
+        assert len(set(image_ids)) == 1, f"expected identical image_id, got {image_ids}"
+
+        counts = repo._run_read(  # type: ignore[attr-defined]
+            "MATCH (i:Image {storage_uri:$u}) RETURN count(i) AS cnt", {"u": storage_uri}
+        )
+        assert counts and counts[0].get("cnt") == 1
+    finally:
+        repo._run_write(  # type: ignore[attr-defined]
+            """
+            MATCH (i:Image {image_id:$image_id})
+            OPTIONAL MATCH (i)-[r]-()
+            DELETE r, i
+            """,
+            {"image_id": image_id},
+        )
+        repo.close()
