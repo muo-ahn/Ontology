@@ -5,7 +5,7 @@
 | R1          | Graph context coverage              | Completed      | Slot rebalance + multi-pattern paths (graph_repo.py, context_pack.py) |
 | R2          | Image upsert idempotency            | Completed      | storage_uri-first reuse with repeated upsert test (graph_repo.py, tests/test_paths_and_analyze.py) |
 | R3          | Consensus & language hygiene        | Pending        |  |
-| R4          | Evidence summary completeness       | In Progress    | SUMMARY relation expansion & slot_limits output (graph_repo.py, context_pack.py) |
+| R4          | Evidence summary completeness       | Completed      | SUMMARY now includes HAS_IMAGE/ENCOUNTER/INFERENCE edges; slot_meta exposed with tests (graph_repo.py, context_pack.py, tests) |
 | R5          | Similarity exploration controls     | Pending        |  |
 | R6          | Tooling & CI enablement             | Pending        |  |
 

@@ -147,6 +147,11 @@ def test_build_bundle_includes_evidence_paths():
     assert bundle["facts"]["image_id"] == "IMG_123"
     assert len(bundle["facts"]["findings"]) == 2
     assert bundle["slot_limits"] == {"findings": 2, "reports": 0, "similarity": 0}
+    assert bundle["slot_meta"]["requested_k"] == 2
+    assert bundle["slot_meta"]["applied_k"] == 2
+    assert bundle["slot_meta"]["slot_source"] == "auto"
+    assert bundle["slot_meta"]["requested_overrides"] == {}
+    assert bundle["slot_meta"]["allocated_total"] == sum(bundle["slot_limits"].values())
 
 
 def test_build_bundle_reduces_k_when_context_too_long():
@@ -164,7 +169,34 @@ def test_build_bundle_reduces_k_when_context_too_long():
     assert repo.path_kwargs[0]["k_slots"]["findings"] == 2
     assert repo.path_kwargs[1]["k_slots"]["findings"] == 1
     assert repo.path_kwargs[2]["k_slots"]["findings"] == 0
+    assert bundle["slot_meta"]["requested_k"] == 2
+    assert bundle["slot_meta"]["applied_k"] <= 2
+    assert bundle["slot_meta"]["slot_source"] == "auto"
+    assert bundle["slot_meta"]["requested_overrides"] == {}
+    assert bundle["slot_meta"]["allocated_total"] == sum(bundle["slot_limits"].values())
 
+
+def test_build_bundle_preserves_extended_summary_relations():
+    bundle_payload = _base_bundle()
+    bundle_payload["summary"] = [
+        {"rel": "HAS_FINDING", "cnt": 2, "avg_conf": 0.81},
+        {"rel": "HAS_IMAGE", "cnt": 1, "avg_conf": None},
+        {"rel": "HAS_ENCOUNTER", "cnt": 1, "avg_conf": None},
+        {"rel": "HAS_INFERENCE", "cnt": 3, "avg_conf": 0.74},
+        {"rel": "SIMILAR_TO", "cnt": 1, "avg_conf": 0.62},
+    ]
+    repo = DummyRepo(bundle=bundle_payload, paths_by_k={2: []})
+    builder = GraphContextBuilder(repo=repo)
+
+    bundle = builder.build_bundle("IMG_123", k=2)
+
+    summary_lines = bundle["summary"]
+    assert any("HAS_IMAGE" in line for line in summary_lines)
+    assert any("HAS_ENCOUNTER" in line for line in summary_lines)
+    assert any("HAS_INFERENCE" in line for line in summary_lines)
+    relations = [row["rel"] for row in bundle["summary_rows"]]
+    assert relations[:4] == ["HAS_FINDING", "HAS_IMAGE", "HAS_ENCOUNTER", "HAS_INFERENCE"]
+    assert bundle["slot_meta"]["allocated_total"] == sum(bundle["slot_limits"].values())
 
 def test_build_prompt_context_json_mode_skips_path_fetch():
     repo = DummyRepo(bundle=_base_bundle(), paths_by_k=_paths_payload())
@@ -198,6 +230,11 @@ def test_context_pack_builder_returns_dataclass():
     assert pack.facts.image_id == "IMG_123"
     assert pack.evidence_paths[0].slot == "findings"
     assert repo.path_kwargs[0]["k_slots"] == {"findings": 2, "reports": 0, "similarity": 0}
+    assert pack.slot_limits == {"findings": 2, "reports": 0, "similarity": 0}
+    assert pack.slot_meta["requested_k"] == 2
+    assert pack.slot_meta["slot_source"] == "auto"
+    assert pack.slot_meta["allocated_total"] == sum(pack.slot_limits.values())
+    assert pack.slot_meta["allocated_total"] == sum(pack.slot_limits.values())
 
 
 def test_build_bundle_deduplicates_path_rows():
@@ -279,6 +316,9 @@ def test_build_bundle_rebalances_slots_when_reports_absent():
     assert len(bundle["paths"]) == 4
     assert all(path["slot"] == "findings" for path in bundle["paths"])
     assert bundle["slot_limits"] == {"findings": 4, "reports": 0, "similarity": 0}
+    assert bundle["slot_meta"]["requested_k"] == 4
+    assert bundle["slot_meta"]["slot_source"] == "auto"
+    assert bundle["slot_meta"]["allocated_total"] == sum(bundle["slot_limits"].values())
 
 
 def test_context_pack_summary_augmented_from_paths():
@@ -310,6 +350,9 @@ def test_context_pack_summary_augmented_from_paths():
     assert any("HAS_FINDING" in line for line in summary_lines)
     assert any("LOCATED_IN" in line for line in summary_lines)
     assert any("SIMILAR_TO" in line for line in summary_lines)
+    assert pack.slot_limits == {"findings": 2, "reports": 0, "similarity": 0}
+    assert pack.slot_meta["requested_k"] == 2
+    assert pack.slot_meta["slot_source"] == "auto"
 
 
 def test_context_pack_builder_rebalances_slots():
@@ -332,3 +375,7 @@ def test_context_pack_builder_rebalances_slots():
     assert repo.path_kwargs[1]["k_slots"] == {"findings": 4, "reports": 0, "similarity": 0}
     assert len(pack.evidence_paths) == 4
     assert all(path.slot == "findings" for path in pack.evidence_paths)
+    assert pack.slot_limits == {"findings": 4, "reports": 0, "similarity": 0}
+    assert pack.slot_meta["requested_k"] == 4
+    assert pack.slot_meta["slot_source"] == "auto"
+    assert pack.slot_meta["allocated_total"] == sum(pack.slot_limits.values())

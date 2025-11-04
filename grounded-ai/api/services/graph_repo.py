@@ -128,6 +128,40 @@ CALL {
 }
 CALL {
   WITH i
+  OPTIONAL MATCH (enc:Encounter)-[:HAS_IMAGE]->(i)
+  RETURN count(DISTINCT enc) AS cnt_enc
+}
+CALL {
+  WITH i
+  OPTIONAL MATCH (p:Patient)-[:HAS_ENCOUNTER]->(:Encounter)-[:HAS_IMAGE]->(i)
+  RETURN count(DISTINCT p) AS cnt_pat
+}
+CALL {
+  WITH i
+  OPTIONAL MATCH (i)-[hi:HAS_INFERENCE]->(inf_node:AIInference)
+  WITH i,
+       count(DISTINCT inf_node) AS cnt_inf,
+       [val IN collect(
+         CASE
+             WHEN inf_node IS NOT NULL AND inf_node.confidence IS NOT NULL THEN toFloat(inf_node.confidence)
+             WHEN inf_node IS NOT NULL AND inf_node.conf IS NOT NULL THEN toFloat(inf_node.conf)
+             WHEN hi IS NOT NULL AND hi.confidence IS NOT NULL THEN toFloat(hi.confidence)
+             WHEN hi IS NOT NULL AND hi.conf IS NOT NULL THEN toFloat(hi.conf)
+             ELSE NULL
+         END
+       ) WHERE val IS NOT NULL] AS inference_conf_values
+  RETURN cnt_inf,
+         CASE
+             WHEN size(inference_conf_values) = 0 THEN NULL
+             ELSE round(
+                 reduce(total = 0.0, value IN inference_conf_values | total + value) /
+                 size(inference_conf_values),
+                 2
+             )
+         END AS avg_inf
+}
+CALL {
+  WITH i
   OPTIONAL MATCH (i)-[sim:SIMILAR_TO]->(sim_img:Image)
   RETURN count(DISTINCT sim_img) AS cnt_sim,
          round(coalesce(avg(sim.score), 0.0), 2) AS avg_sim
@@ -142,6 +176,10 @@ WITH i,
      avg_rel,
      cnt_r,
      avg_r,
+     cnt_enc,
+     cnt_pat,
+     cnt_inf,
+     avg_inf,
      cnt_sim,
      avg_sim
 WITH i,
@@ -150,6 +188,9 @@ WITH i,
      (CASE WHEN cnt_loc = 0 THEN [] ELSE [{rel:'LOCATED_IN', cnt: cnt_loc, avg_conf: avg_loc}] END) +
      (CASE WHEN cnt_rel = 0 THEN [] ELSE [{rel:'RELATED_TO', cnt: cnt_rel, avg_conf: avg_rel}] END) +
      (CASE WHEN cnt_r = 0 THEN [] ELSE [{rel:'DESCRIBED_BY', cnt: cnt_r, avg_conf: avg_r}] END) +
+     (CASE WHEN cnt_enc = 0 THEN [] ELSE [{rel:'HAS_IMAGE', cnt: cnt_enc, avg_conf: NULL}] END) +
+     (CASE WHEN cnt_pat = 0 THEN [] ELSE [{rel:'HAS_ENCOUNTER', cnt: cnt_pat, avg_conf: NULL}] END) +
+     (CASE WHEN cnt_inf = 0 THEN [] ELSE [{rel:'HAS_INFERENCE', cnt: cnt_inf, avg_conf: avg_inf}] END) +
      (CASE WHEN cnt_sim = 0 THEN [] ELSE [{rel:'SIMILAR_TO', cnt: cnt_sim, avg_conf: avg_sim}] END) AS summary_rows
 WITH i,
      summary_rows,

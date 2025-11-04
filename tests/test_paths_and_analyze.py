@@ -224,6 +224,13 @@ def test_pipeline_analyze_returns_paths_and_consensus(pipeline_app: FastAPI) -> 
     assert any("LOCATED_IN" in line for line in summary_lines)
     if debug_blob.get("similarity_edges_created", 0):
         assert any("SIMILAR_TO" in line for line in summary_lines)
+    slot_meta = graph_context.get("slot_meta", {})
+    assert isinstance(slot_meta, dict)
+    assert "requested_k" in slot_meta
+    assert slot_meta.get("slot_source") in {"auto", "overrides"}
+    slot_limits = graph_context.get("slot_limits", {})
+    assert isinstance(slot_limits, dict)
+    assert slot_meta.get("allocated_total") == sum(slot_limits.values())
 
     consensus = data.get("results", {}).get("consensus", {})
     assert consensus.get("agreement_score", 0) > 0.2

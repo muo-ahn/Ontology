@@ -5,7 +5,10 @@ set -euo pipefail
 # how to run:
 # bash scripts/run_eval_dummy.sh [A/B/C] [top-k] [max_chars] [image_path]
 # example:
-# bash scripts/run_eval_dummy.sh A 2 120 /data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png
+
+#  PATH="/usr/local/bin:/usr/bin:/bin" \       
+#  bash grounded-ai/scripts/run_eval_dummy.sh \
+#    A 2 120 \    /Users/donghyeokahn/Dev/Ontology/grounded-ai/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png
 
 
 # Configure how cypher queries will be executed (local binary vs docker exec).

@@ -12,10 +12,28 @@ from .graph_repo import GraphRepo
 
 
 _PATH_SLOT_KEYS: Sequence[str] = ("findings", "reports", "similarity")
-_RELATION_KEYS = {"HAS_FINDING", "LOCATED_IN", "RELATED_TO", "DESCRIBED_BY", "SIMILAR_TO"}
+_RELATION_KEYS = {
+    "HAS_FINDING",
+    "LOCATED_IN",
+    "RELATED_TO",
+    "DESCRIBED_BY",
+    "HAS_IMAGE",
+    "HAS_ENCOUNTER",
+    "HAS_INFERENCE",
+    "SIMILAR_TO",
+}
 _RELATION_PATTERN = re.compile(r"-\s*([A-Z_]+)\s*->")
 _FINDING_ID_PATTERN = re.compile(r"Finding\[(?P<id>[^\]]+)\]")
-_SUMMARY_REL_ORDER: Sequence[str] = ("HAS_FINDING", "LOCATED_IN", "RELATED_TO", "DESCRIBED_BY", "SIMILAR_TO")
+_SUMMARY_REL_ORDER: Sequence[str] = (
+    "HAS_FINDING",
+    "LOCATED_IN",
+    "RELATED_TO",
+    "DESCRIBED_BY",
+    "HAS_IMAGE",
+    "HAS_ENCOUNTER",
+    "HAS_INFERENCE",
+    "SIMILAR_TO",
+)
 
 
 def json_dumps_safe(obj: Any, *, indent: int = 2) -> str:
@@ -312,13 +330,14 @@ class GraphContextBuilder:
         if k < 0:
             raise ValueError("k must be >= 0")
 
+        requested_k = max(int(k), 0)
         bundle_payload = self._repo.query_bundle(image_id)
         summary_rows = bundle_payload.get("summary", [])
         facts_data = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
         facts = ContextFacts(**facts_data)
         facts_payload = facts.model_dump(mode="python")
 
-        current_k = max(k, 0)
+        current_k = requested_k
         slot_overrides = dict(k_slots or {})
 
         def _render(current_paths: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -385,6 +404,12 @@ class GraphContextBuilder:
             final_slot_limits = slot_limits
             break
 
+        applied_k = current_k
+        try:
+            slot_overrides_clean = _sanitise_slot_values(slot_overrides)
+        except ValueError:
+            slot_overrides_clean = {}
+
         triples_text = rendered_bundle.get("triples_text", "")
         if max_chars and max_chars > 0 and len(triples_text) > max_chars and hard_trim:
             trimmed = triples_text[: max_chars - 1].rstrip()
@@ -400,6 +425,15 @@ class GraphContextBuilder:
             }
             for path in rendered_bundle.get("evidence_paths", [])
         ]
+        slot_meta = {
+            "requested_k": requested_k,
+            "applied_k": applied_k,
+            "slot_source": "overrides" if slot_overrides_clean else "auto",
+            "requested_overrides": slot_overrides_clean,
+            "allocated_total": sum(max(int(final_slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS),
+        }
+        if slot_overrides and slot_overrides_clean != slot_overrides:
+            slot_meta["requested_overrides_raw"] = slot_overrides
 
         return {
             "summary": summary_lines,
@@ -407,6 +441,7 @@ class GraphContextBuilder:
             "facts": facts_payload,
             "triples": triples_text,
             "slot_limits": final_slot_limits,
+            "slot_meta": slot_meta,
             "summary_rows": final_summary_rows,
         }
 
@@ -454,6 +489,8 @@ class ContextPack(BaseModel):
     edge_summary: str
     evidence_paths: List[EvidencePath] = Field(default_factory=list)
     facts: ContextFacts
+    slot_limits: Dict[str, int] = Field(default_factory=dict)
+    slot_meta: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ContextPackBuilder:
@@ -508,7 +545,29 @@ class ContextPackBuilder:
         edge_summary = _format_edge_summary(effective_summary_rows)
         evidence_paths = _build_evidence_paths(final_deduped_rows)
 
-        return ContextPack(edge_summary=edge_summary, evidence_paths=evidence_paths, facts=facts)
+        final_slot_limits = dict(slot_limits)
+        raw_overrides = dict(k_slots) if k_slots else {}
+        try:
+            slot_overrides_clean = _sanitise_slot_values(raw_overrides) if raw_overrides else {}
+        except ValueError:
+            slot_overrides_clean = {}
+        slot_meta = {
+            "requested_k": max(int(k_raw), 0),
+            "applied_k": max(int(k_value), 0),
+            "slot_source": "overrides" if slot_overrides_clean else "auto",
+            "requested_overrides": slot_overrides_clean,
+            "allocated_total": sum(max(int(final_slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS),
+        }
+        if raw_overrides and slot_overrides_clean != raw_overrides:
+            slot_meta["requested_overrides_raw"] = raw_overrides
+
+        return ContextPack(
+            edge_summary=edge_summary,
+            evidence_paths=evidence_paths,
+            facts=facts,
+            slot_limits=final_slot_limits,
+            slot_meta=slot_meta,
+        )
 
 
 __all__ = [
