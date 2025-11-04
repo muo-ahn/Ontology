@@ -285,3 +285,60 @@ def test_upsert_case_idempotent_by_storage_uri() -> None:
             {"image_id": image_id},
         )
         repo.close()
+
+
+def test_pipeline_normalises_dummy_id_from_file_path(pipeline_app: FastAPI) -> None:
+    client = TestClient(pipeline_app)
+    dummy_path = (
+        Path(__file__).resolve().parents[1]
+        / "grounded-ai"
+        / "data"
+        / "medical_dummy"
+        / "images"
+        / "img_001.png"
+    )
+    if not dummy_path.exists():
+        pytest.skip(f"dummy image not available at {dummy_path}")
+
+    cleanup_repo = GraphRepo.from_env()
+    try:
+        cleanup_repo._run_write(  # type: ignore[attr-defined]
+            """
+            MATCH (i:Image {image_id:$image_id})
+            OPTIONAL MATCH (i)-[r]-()
+            DELETE r, i
+            """,
+            {"image_id": "IMG_001"},
+        )
+    finally:
+        cleanup_repo.close()
+
+    for attempt in range(2):
+        response = client.post(
+            "/pipeline/analyze",
+            params={"debug": 1},
+            json={
+                "file_path": str(dummy_path),
+                "modes": ["V", "VL", "VGL"],
+                "k": 2,
+                "max_chars": 40,
+            },
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        debug_blob = payload.get("debug", {})
+        assert debug_blob.get("norm_image_id") == "IMG_001"
+        assert debug_blob.get("norm_image_id_source") == "dummy_lookup"
+        assert debug_blob.get("dummy_lookup_hit") is True
+        storage_uri = debug_blob.get("storage_uri")
+        assert isinstance(storage_uri, str) and storage_uri.lower().endswith("img_001.png")
+
+    repo = GraphRepo.from_env()
+    try:
+        counts = repo._run_read(  # type: ignore[attr-defined]
+            "MATCH (i:Image {image_id:$image_id}) RETURN count(i) AS cnt",
+            {"image_id": "IMG_001"},
+        )
+        assert counts and counts[0].get("cnt") == 1
+    finally:
+        repo.close()

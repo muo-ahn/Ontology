@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from itertools import combinations
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from models.pipeline import AnalyzeResp
 from services.context_pack import GraphContextBuilder
+from services.dummy_registry import DummyImageRegistry, LookupResult
 from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
 from services.llm_runner import LLMRunner
@@ -325,17 +326,30 @@ def _slugify(value: str) -> str:
     return cleaned[:48]
 
 
-def _derive_image_id_from_path(path: Optional[str]) -> Optional[str]:
+def _derive_image_id_from_path(path: Optional[str]) -> Tuple[Optional[str], Optional[LookupResult]]:
     if not path:
-        return None
+        return None, None
+
+    lookup = DummyImageRegistry.resolve_by_path(path)
+    if lookup:
+        return lookup.image_id, lookup
+
     stem = Path(path).stem
     alnum = re.sub(r"[^A-Za-z0-9]+", "", stem)
     if not alnum:
-        return None
-    return alnum.upper()[:48]
+        return None, None
+    return alnum.upper()[:48], None
 
 
-def _resolve_seed_storage_uri(file_path: Optional[str], image_id: Optional[str]) -> Optional[str]:
+def _resolve_seed_storage_uri(
+    file_path: Optional[str],
+    image_id: Optional[str],
+    preferred: Optional[str] = None,
+) -> Optional[str]:
+    if preferred:
+        candidate = preferred.strip()
+        if candidate:
+            return candidate
     if not file_path:
         return None
     path = Path(file_path)
@@ -563,29 +577,60 @@ async def analyze(
 
         normalized_image = dict(normalized.get("image") or {})
         normalized_image_id = normalized_image.get("image_id")
+        lookup_result: Optional[LookupResult] = None
+        lookup_source: Optional[str] = None
         image_id_source = "normalizer"
         resolved_path = payload.file_path or image_path
+
         if payload.image_id:
-            normalized_image_id = payload.image_id
+            try:
+                normalized_image_id = DummyImageRegistry.normalise_id(payload.image_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="image_id must not be blank") from exc
             image_id_source = "payload"
         else:
-            derived_from_path = _derive_image_id_from_path(resolved_path)
-            if derived_from_path:
-                normalized_image_id = derived_from_path
-                image_id_source = "file_path"
+            derived_image_id, lookup_candidate = _derive_image_id_from_path(resolved_path)
+            if derived_image_id:
+                normalized_image_id = derived_image_id
+                if lookup_candidate:
+                    lookup_result = lookup_candidate
+                    lookup_source = lookup_candidate.source
+                    image_id_source = "dummy_lookup"
+                else:
+                    image_id_source = "file_path"
+
         if not normalized_image_id:
             raise HTTPException(status_code=502, detail="unable to derive image identifier")
+
+        try:
+            normalized_image_id = DummyImageRegistry.normalise_id(str(normalized_image_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="unable to derive image identifier") from exc
+
+        if not lookup_result:
+            lookup_result = DummyImageRegistry.resolve_by_id(normalized_image_id)
+            if lookup_result:
+                lookup_source = lookup_result.source
+                if image_id_source != "payload":
+                    image_id_source = "dummy_lookup"
 
         image_id = normalized_image_id
         case_id = _resolve_case_id(payload, image_path, image_id)
         final_image_path = image_path or payload.file_path or normalized_image.get("path")
-        storage_uri = _resolve_seed_storage_uri(resolved_path, normalized_image_id)
+        lookup_storage_uri = lookup_result.storage_uri if lookup_result else None
+        storage_uri = _resolve_seed_storage_uri(resolved_path, normalized_image_id, preferred=lookup_storage_uri)
         if not storage_uri:
             storage_uri = normalized_image.get("storage_uri")
         if not storage_uri and final_image_path:
-            storage_uri = _resolve_seed_storage_uri(final_image_path, normalized_image_id) or str(final_image_path)
+            storage_uri = _resolve_seed_storage_uri(final_image_path, normalized_image_id)
+            if not storage_uri:
+                storage_uri = str(final_image_path)
         if storage_uri and isinstance(storage_uri, str):
             storage_uri = storage_uri.strip() or None
+
+        if lookup_result and lookup_result.modality and not normalized_image.get("modality"):
+            normalized_image["modality"] = lookup_result.modality
+
         storage_uri_key = os.path.basename(storage_uri) if storage_uri else None
         if not storage_uri_key and resolved_path:
             storage_uri_key = os.path.basename(str(resolved_path))
@@ -600,6 +645,8 @@ async def analyze(
                 "image_id_source": image_id_source,
                 "image_path": resolved_path,
                 "storage_uri_key": storage_uri_key,
+                "dummy_lookup_hit": bool(lookup_result),
+                "dummy_lookup_source": lookup_source,
             },
         )
 
@@ -637,7 +684,13 @@ async def analyze(
                 "pre_upsert_report_conf": normalized_report.get("conf"),
             })
             debug_blob["norm_image_id"] = image_id
+            debug_blob["norm_image_id_source"] = image_id_source
             debug_blob["storage_uri"] = storage_uri
+            debug_blob["dummy_lookup_hit"] = bool(lookup_result)
+            if lookup_source:
+                debug_blob["dummy_lookup_source"] = lookup_source
+            if not lookup_result and image_id_source != "payload":
+                debug_blob["norm_image_id_warning"] = "dummy_lookup_miss"
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
