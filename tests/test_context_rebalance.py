@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
+from pathlib import Path
 
 if "py2neo" not in sys.modules:
     py2neo_stub = types.ModuleType("py2neo")
@@ -22,6 +24,19 @@ if "neo4j" not in sys.modules:
     sys.modules["neo4j.exceptions"] = exceptions_stub
 
 from services.context_pack import _rebalance_slot_limits
+
+routers_stub = types.ModuleType("routers")
+routers_stub.__path__ = [str(Path(__file__).resolve().parents[1] / "grounded-ai" / "api" / "routers")]
+sys.modules.setdefault("routers", routers_stub)
+
+_PIPELINE_PATH = Path(__file__).resolve().parents[1] / "grounded-ai" / "api" / "routers" / "pipeline.py"
+module_name = "routers.pipeline"
+spec = importlib.util.spec_from_file_location(module_name, _PIPELINE_PATH)
+assert spec and spec.loader
+pipeline_module = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = pipeline_module
+spec.loader.exec_module(pipeline_module)
+_replace_image_tokens = getattr(pipeline_module, "_replace_image_tokens")
 
 
 def _path(slot: str) -> dict:
@@ -50,3 +65,9 @@ def test_rebalance_prefers_slots_with_returned_paths() -> None:
     rebalanced = _rebalance_slot_limits(slots, paths)
     assert rebalanced["reports"] >= 1
     assert sum(rebalanced.values()) == 2
+
+
+def test_replace_image_tokens() -> None:
+    assert _replace_image_tokens("Report for (IMAGE_ID)", "IMG201") == "Report for IMG201"
+    assert _replace_image_tokens("No token", "IMG201") == "No token"
+    assert _replace_image_tokens(None, "IMG201") is None

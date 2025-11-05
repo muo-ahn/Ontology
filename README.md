@@ -193,5 +193,4 @@ curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
         "max_chars": 120
       }' \
   | jq '{slots: .debug.context_slot_limits, paths: .graph_context.paths}'
-
 ```

@@ -49,6 +49,15 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 logger = logging.getLogger(__name__)
 
 
+def _replace_image_tokens(text: Optional[str], image_id: Optional[str]) -> Optional[str]:
+    if not isinstance(text, str) or not image_id:
+        return text
+    result = text
+    for token in ["(IMAGE_ID)", "IMAGE_ID"]:
+        result = result.replace(token, image_id)
+    return result
+
+
 class AnalyzeReq(BaseModel):
     case_id: Optional[str] = Field(default=None, description="Existing case identifier")
     image_id: Optional[str] = Field(default=None, description="Optional image identifier")
@@ -541,6 +550,8 @@ async def analyze(
     similar_seed_images: List[Dict[str, Any]] = []
     similarity_edges_created = 0
     similarity_candidates_debug = 0
+    vgl_fallback_used = False
+    vgl_fallback_reason: Optional[str] = None
 
     try:
         current_stage = "image_load"
@@ -968,6 +979,8 @@ async def analyze(
                     if debug:
                         vgl_payload["reason"] = "graph_evidence_missing_or_findings_empty"
                     results["VGL"] = vgl_payload
+                    vgl_fallback_used = True
+                    vgl_fallback_reason = "graph_evidence_missing_or_findings_empty"
                 else:
                     timings["llm_vgl_ms"] = 0
                     results["VGL"] = {"text": "Graph findings unavailable", "latency_ms": 0, "degraded": False}
@@ -1002,6 +1015,36 @@ async def analyze(
         consensus = compute_consensus(results, weights=weights, min_agree=0.35)
         results["consensus"] = consensus
         debug_blob["consensus"] = consensus
+        if vgl_fallback_used:
+            consensus = dict(consensus)
+            consensus["status"] = "low_confidence"
+            consensus["confidence"] = "very_low"
+            fallback_note = "graph evidence missing; fell back to VL"
+            if vgl_fallback_reason:
+                fallback_note = vgl_fallback_reason.replace("_", " ")
+            existing_notes = consensus.get("notes")
+            consensus["notes"] = f"{existing_notes} | {fallback_note}" if existing_notes else fallback_note
+            consensus.setdefault("presented_text", consensus.get("text") or "")
+            results["consensus"] = consensus
+            debug_blob["consensus"] = consensus
+            results["status"] = "low_confidence"
+
+        for mode in ("V", "VL", "VGL"):
+            entry = results.get(mode)
+            if isinstance(entry, dict):
+                if "text" in entry:
+                    entry["text"] = _replace_image_tokens(entry.get("text"), image_id)
+                if "presented_text" in entry:
+                    entry["presented_text"] = _replace_image_tokens(entry.get("presented_text"), image_id)
+
+        consensus_entry = results.get("consensus")
+        if isinstance(consensus_entry, dict):
+            if "text" in consensus_entry:
+                consensus_entry["text"] = _replace_image_tokens(consensus_entry.get("text"), image_id)
+            if "presented_text" in consensus_entry:
+                consensus_entry["presented_text"] = _replace_image_tokens(consensus_entry.get("presented_text"), image_id)
+            if "notes" in consensus_entry:
+                consensus_entry["notes"] = _replace_image_tokens(consensus_entry.get("notes"), image_id)
         if finding_source:
             results["finding_source"] = finding_source
         if seeded_finding_ids:
@@ -1054,6 +1097,9 @@ async def analyze(
         if consensus.get("disagreed_modes"):
             evaluation_consensus["disagreed_modes"] = consensus.get("disagreed_modes")
 
+        evaluation_consensus["text"] = _replace_image_tokens(evaluation_consensus.get("text"), image_id) or ""
+        evaluation_consensus["notes"] = _replace_image_tokens(evaluation_consensus.get("notes"), image_id) if evaluation_consensus.get("notes") else evaluation_consensus.get("notes")
+
         evaluation_payload = {
             "image_id": image_id,
             "similar_seed_images": similar_seed_images,
@@ -1064,6 +1110,7 @@ async def analyze(
             "context_paths": paths_list,
             "consensus": evaluation_consensus,
         }
+        evaluation_payload["status"] = results.get("consensus", {}).get("status")
         evaluation_payload["finding_source"] = finding_source
         evaluation_payload["seeded_finding_ids"] = seeded_finding_ids
 
