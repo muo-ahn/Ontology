@@ -114,9 +114,7 @@ class DummyImageRegistry:
             raise ValueError("image_id cannot be blank")
         cleaned = cleaned.replace("-", "_")
         cleaned = cleaned.replace(" ", "")
-        cleaned = cleaned.upper()
-        if cleaned.startswith("IMG") and "_" not in cleaned:
-            cleaned = f"{cleaned[:3]}_{cleaned[3:]}"
+        cleaned = re.sub(r"_+", "_", cleaned.upper())
         return cleaned
 
     @classmethod
