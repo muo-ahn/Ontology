@@ -169,7 +169,7 @@ curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
   | jq '{finding_fallback: .debug.finding_fallback, finding_source: .results.finding_source, seeded_ids: .results.seeded_finding_ids}'
 ```
 
-### 10. /pipeline/analyze
+### 10. /pipeline/analyze e2e test
 sync true
 ```bash
 curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
@@ -181,4 +181,17 @@ curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
         "max_chars": 120,
         "parameters": {"force_dummy_fallback": true}
       }'
+```
+
+```bash
+curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "file_path": "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png",
+        "modes": ["V","VL","VGL"],
+        "k": 2,
+        "max_chars": 120
+      }' \
+  | jq '{slots: .debug.context_slot_limits, paths: .graph_context.paths}'
+
 ```

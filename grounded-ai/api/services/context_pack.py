@@ -175,20 +175,43 @@ def _rebalance_slot_limits(slots: Dict[str, int], paths: Sequence[Dict[str, Any]
         if slot in counts:
             counts[slot] += 1
 
-    present = [key for key in _PATH_SLOT_KEYS if slots.get(key, 0) > 0 and counts.get(key, 0) > 0]
-    if not present:
-        present = [key for key in _PATH_SLOT_KEYS if slots.get(key, 0) > 0]
-    if not present:
-        return slots
+    order = list(_PATH_SLOT_KEYS)
+    if counts.get("findings", 0) == 0:
+        order = ["reports", "similarity", "findings"]
 
-    base = total // len(present)
-    remainder = total % len(present)
+    current = {key: max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS}
     rebalanced = {key: 0 for key in _PATH_SLOT_KEYS}
-    for key in present:
-        allocation = base + (1 if remainder > 0 else 0)
+    remaining = total
+
+    primary = [key for key in order if counts.get(key, 0) > 0]
+    secondary = [key for key in order if key not in primary]
+
+    for key in primary:
+        if remaining <= 0:
+            break
+        desired = current.get(key, 0) or 1
+        allocation = min(remaining, max(desired, 1))
         rebalanced[key] = allocation
-        if remainder > 0:
-            remainder -= 1
+        remaining -= allocation
+
+    for key in secondary:
+        if remaining <= 0:
+            break
+        if rebalanced[key] == 0:
+            rebalanced[key] = 1
+            remaining -= 1
+
+    distribution_order = [key for key in order if rebalanced.get(key, 0) > 0]
+    if not distribution_order:
+        distribution_order = order
+
+    idx = 0
+    while remaining > 0 and distribution_order:
+        key = distribution_order[idx % len(distribution_order)]
+        rebalanced[key] += 1
+        remaining -= 1
+        idx += 1
+
     return rebalanced
 
 
