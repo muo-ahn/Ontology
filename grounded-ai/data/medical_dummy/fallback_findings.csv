@@ -1,0 +1,11 @@
+image_id,finding_id,type,location,size_cm,conf
+IMG201,F201,mass,lung,1.0,0.70
+IMG201,F202,nodule,liver,1.4,0.75
+IMG202,F202,nodule,liver,1.4,0.75
+IMG202,F203,ischemic,lung,1.8,0.80
+IMG203,F203,ischemic,lung,1.8,0.80
+IMG203,F204,mass,liver,2.2,0.85
+IMG204,F204,mass,liver,2.2,0.85
+IMG204,F205,nodule,lung,2.6,0.90
+IMG205,F205,nodule,lung,2.6,0.90
+IMG205,F206,ischemic,liver,3.0,0.70

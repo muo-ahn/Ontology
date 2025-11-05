@@ -9,8 +9,9 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from services.dummy_registry import DummyFindingRegistry, FindingStub
 from services.vlm_runner import VLMRunner
 
 
@@ -80,12 +81,39 @@ def clamp_one_line(text: str, max_chars: int = 120) -> str:
     return cleaned[:max_chars]
 
 
-def _fallback_findings_from_caption(caption: str) -> List[Dict[str, Any]]:
-    """Generate basic findings when the VLM output does not provide any."""
+def _fallback_findings_from_caption(
+    caption: str,
+    image_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Generate fallback findings and report whether dummy registry matched."""
+
+    registry_hit = False
+
+    if image_id:
+        try:
+            seeded: List[FindingStub] = DummyFindingRegistry.resolve(image_id)
+        except ValueError:
+            seeded = []
+        if seeded:
+            registry_hit = True
+            return (
+                [
+                    {
+                        "id": stub.finding_id,
+                        "type": stub.type,
+                        "location": stub.location,
+                        "size_cm": stub.size_cm,
+                        "conf": stub.conf,
+                        "source": stub.source,
+                    }
+                    for stub in seeded
+                ],
+                registry_hit,
+            )
 
     text = (caption or "").strip()
     if not text:
-        return []
+        return [], registry_hit
 
     lowered = text.lower()
     finding_type: Optional[str] = None
@@ -95,7 +123,7 @@ def _fallback_findings_from_caption(caption: str) -> List[Dict[str, Any]]:
             break
 
     if not finding_type:
-        return []
+        return [], registry_hit
 
     location: Optional[str] = None
     for code, label in _LOBE_MAP.items():
@@ -112,15 +140,19 @@ def _fallback_findings_from_caption(caption: str) -> List[Dict[str, Any]]:
         except ValueError:
             size_cm = None
 
-    return [
-        {
-            "id": None,
-            "type": finding_type,
-            "location": location,
-            "size_cm": size_cm,
-            "conf": 0.5,
-        }
-    ]
+    return (
+        [
+            {
+                "id": None,
+                "type": finding_type,
+                "location": location,
+                "size_cm": size_cm,
+                "conf": 0.5,
+                "source": "caption_keywords",
+            }
+        ],
+        registry_hit,
+    )
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -180,6 +212,7 @@ def _normalise_findings(
         finding_id = item.get("id")
         if not finding_id:
             finding_id = _derive_finding_id(image_id, finding_type, location, size_cm)
+        source = item.get("source")
         findings.append(
             {
                 "id": finding_id,
@@ -187,6 +220,7 @@ def _normalise_findings(
                 "location": location,
                 "size_cm": size_cm,
                 "conf": conf,
+                **({"source": source} if source else {}),
             }
         )
     return findings
@@ -196,6 +230,8 @@ async def normalize_from_vlm(
     file_path: Optional[str],
     image_id: Optional[str],
     vlm_runner: VLMRunner,
+    *,
+    force_dummy_fallback: bool = False,
 ) -> Dict[str, Any]:
     """Call the VLM and return a normalised payload shared across endpoints."""
 
@@ -262,9 +298,23 @@ async def normalize_from_vlm(
     findings_raw = parsed.get("findings") if isinstance(parsed.get("findings"), list) else []
     findings = _normalise_findings(findings_raw, resolved_image_id)
 
-    if not findings:
-        findings = _fallback_findings_from_caption(caption_text)
-        findings = _normalise_findings(findings, resolved_image_id)
+    fallback_registry_hit = False
+    fallback_candidates: List[Dict[str, Any]] = []
+    fallback_strategy: Optional[str] = None
+    fallback_used = False
+    if not findings or force_dummy_fallback:
+        fallback_candidates, fallback_registry_hit = _fallback_findings_from_caption(
+            caption_text,
+            resolved_image_id,
+        )
+        if fallback_candidates:
+            fallback_strategy = (
+                "mock_seed" if fallback_registry_hit else fallback_candidates[0].get("source") or "caption_keywords"
+            )
+            findings = _normalise_findings(fallback_candidates, resolved_image_id)
+            fallback_used = True
+        elif not findings:
+            findings = []
 
     caption_ko_raw = parsed.get("caption_ko")
     caption_ko = None
@@ -289,6 +339,12 @@ async def normalize_from_vlm(
         "caption_ko": caption_ko,
         "vlm_latency_ms": latency_ms,
         "raw_vlm": raw_result,
+    }
+    normalized["finding_fallback"] = {
+        "used": fallback_used,
+        "registry_hit": fallback_registry_hit,
+        "strategy": fallback_strategy if fallback_used else None,
+        "force": force_dummy_fallback,
     }
     return normalized
 

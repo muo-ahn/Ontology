@@ -141,3 +141,44 @@ curl -X POST http://localhost:8000/graph/cypher \
   -H "Content-Type: application/json" \
   -d '{"query": "MATCH (i:Image)-[r:HAS_FINDING]->(f:Finding) RETURN i.id AS image, f.type AS finding LIMIT 5"}'
 ```
+
+### 8. vision pipeline debug 질의
+```bash
+curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "file_path":"/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png", 
+        "modes":["V","VL","VGL"], 
+        "k":2, 
+        "max_chars":120  
+      }' \
+  | jq '.debug'                                                                                                                       
+```
+
+### 9. debug
+```bash
+curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "file_path": "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png",
+        "modes": ["V","VL","VGL"],
+        "k": 2,
+        "max_chars": 120,
+        "parameters": {"force_dummy_fallback": true}
+      }' \
+  | jq '{finding_fallback: .debug.finding_fallback, finding_source: .results.finding_source, seeded_ids: .results.seeded_finding_ids}'
+```
+
+### 10. /pipeline/analyze
+sync true
+```bash
+curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "file_path": "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png",
+        "modes": ["V","VL","VGL"],
+        "k": 2,
+        "max_chars": 120,
+        "parameters": {"force_dummy_fallback": true}
+      }'
+```

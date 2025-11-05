@@ -9,18 +9,26 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(
-    os.getenv(
-        "MEDICAL_DUMMY_DIR",
-        Path(__file__).resolve().parents[2] / "data" / "medical_dummy",
-    )
-)
+_DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "medical_dummy"
+_CANDIDATE_ROOTS: List[Path] = []
+
+env_root = os.getenv("MEDICAL_DUMMY_DIR")
+if env_root:
+    _CANDIDATE_ROOTS.append(Path(env_root))
+
+# Common Docker volume mount location
+_CANDIDATE_ROOTS.append(Path("/data/medical_dummy"))
+_CANDIDATE_ROOTS.append(Path(__file__).resolve().parents[1] / "data" / "medical_dummy")
+_CANDIDATE_ROOTS.append(_DEFAULT_DATA_ROOT)
+
+_DATA_ROOT = next((path for path in _CANDIDATE_ROOTS if path.exists()), _DEFAULT_DATA_ROOT)
 _IMAGING_FILE = _DATA_ROOT / "imaging.csv"
 _ALIASES_FILE = _DATA_ROOT / "imaging_aliases.csv"
+_FALLBACK_FINDINGS_FILE = _DATA_ROOT / "fallback_findings.csv"
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,16 @@ class LookupResult:
     storage_uri: Optional[str]
     modality: Optional[str]
     source: str
+
+
+@dataclass(frozen=True)
+class FindingStub:
+    finding_id: str
+    type: Optional[str]
+    location: Optional[str]
+    size_cm: Optional[float]
+    conf: Optional[float]
+    source: str = "mock_seed"
 
 
 def _canonical_filename(name: str) -> str:
@@ -49,6 +67,19 @@ def _derive_candidate_from_name(name: str) -> Optional[str]:
     if match:
         return f"{match.group(1).upper()}_{match.group(2)}"
     return None
+
+
+def _coerce_float(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        logger.debug("dummy_registry.float_coerce_failed", extra={"value": value})
+        return None
 
 
 @lru_cache()
@@ -100,6 +131,38 @@ def _load_alias_map() -> Dict[str, str]:
             canonical_alias = _canonical_filename(alias)
             alias_map[canonical_alias] = DummyImageRegistry.normalise_id(image_id)
     return alias_map
+
+
+@lru_cache()
+def _load_fallback_findings() -> Dict[str, List[FindingStub]]:
+    mapping: Dict[str, List[FindingStub]] = {}
+    if not _FALLBACK_FINDINGS_FILE.exists():
+        logger.warning(
+            "dummy_registry.fallback_findings_missing",
+            extra={"path": str(_FALLBACK_FINDINGS_FILE)},
+        )
+        return mapping
+
+    with _FALLBACK_FINDINGS_FILE.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            image_id_raw = raw.get("image_id")
+            finding_id = raw.get("finding_id")
+            if not image_id_raw or not finding_id:
+                continue
+            try:
+                canonical_id = DummyImageRegistry.normalise_id(image_id_raw)
+            except ValueError:
+                continue
+            stub = FindingStub(
+                finding_id=finding_id.strip(),
+                type=(raw.get("type") or None),
+                location=(raw.get("location") or None),
+                size_cm=_coerce_float(raw.get("size_cm")),
+                conf=_coerce_float(raw.get("conf")),
+            )
+            mapping.setdefault(canonical_id, []).append(stub)
+    return mapping
 
 
 class DummyImageRegistry:
@@ -164,7 +227,24 @@ class DummyImageRegistry:
         return None
 
 
+class DummyFindingRegistry:
+    """Expose deterministic fallback findings for dummy images."""
+
+    @classmethod
+    def resolve(cls, raw_image_id: str) -> List[FindingStub]:
+        canonical = DummyImageRegistry.normalise_id(raw_image_id)
+        mapping = _load_fallback_findings()
+        return list(mapping.get(canonical, []))
+
+    @classmethod
+    def available_image_ids(cls) -> List[str]:
+        mapping = _load_fallback_findings()
+        return sorted(mapping.keys())
+
+
 __all__ = [
     "DummyImageRegistry",
     "LookupResult",
+    "DummyFindingRegistry",
+    "FindingStub",
 ]

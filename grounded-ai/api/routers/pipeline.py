@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from models.pipeline import AnalyzeResp
 from services.context_pack import GraphContextBuilder
-from services.dummy_registry import DummyImageRegistry, LookupResult
+from services.dummy_registry import DummyFindingRegistry, DummyImageRegistry, LookupResult
 from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
 from services.llm_runner import LLMRunner
@@ -465,6 +465,7 @@ async def analyze(
     context_builder: Optional[GraphContextBuilder] = None
     debug_blob: Dict[str, Any] = {"stage": "init"}
     param_overrides: Dict[str, Any] = dict(payload.parameters or {})
+    force_dummy_fallback = _is_truthy(param_overrides.get("force_dummy_fallback"))
 
     def _resolve_int_param(
         primary: Optional[int],
@@ -565,6 +566,7 @@ async def analyze(
                 file_path=image_path_for_vlm,
                 image_id=payload.image_id,
                 vlm_runner=vlm,
+                force_dummy_fallback=force_dummy_fallback,
             )
         if debug_enabled:
             debug_blob["stage"] = current_stage
@@ -669,7 +671,87 @@ async def analyze(
 
         # Normalize + dedup findings (keep list[dict] invariant)
         normalized_findings = dedup_findings(list(normalized.get("findings") or []))
+
+        seeded_finding_ids: List[str] = []
+        seeded_records: List[Dict[str, Any]] = []
+        try:
+            seeded_stubs = DummyFindingRegistry.resolve(image_id)
+        except ValueError:
+            seeded_stubs = []
+        if seeded_stubs:
+            seeded_records = [
+                {
+                    "id": stub.finding_id,
+                    "type": stub.type,
+                    "location": stub.location,
+                    "size_cm": stub.size_cm,
+                    "conf": stub.conf,
+                    "source": stub.source,
+                }
+                for stub in seeded_stubs
+            ]
+
+        fallback_meta = dict(normalized.get("finding_fallback") or {})
+        fallback_used = bool(fallback_meta.get("used"))
+        fallback_strategy = fallback_meta.get("strategy")
+        fallback_registry_hit = bool(fallback_meta.get("registry_hit"))
+        fallback_forced = bool(fallback_meta.get("force")) or force_dummy_fallback
+
+        if (force_dummy_fallback or not normalized_findings) and seeded_records:
+            normalized_findings = dedup_findings(seeded_records)
+            fallback_used = True
+            fallback_registry_hit = True
+            fallback_strategy = "mock_seed"
+
         normalized["findings"] = normalized_findings
+
+        fallback_meta = dict(normalized.get("finding_fallback") or {})
+        fallback_used = bool(fallback_meta.get("used"))
+        fallback_strategy = fallback_meta.get("strategy")
+        fallback_registry_hit = bool(fallback_meta.get("registry_hit"))
+        fallback_forced = bool(fallback_meta.get("force")) or force_dummy_fallback
+        seeded_finding_ids: List[str] = []
+        for finding in normalized_findings:
+            fid = finding.get("id")
+            if finding.get("source") == "mock_seed" and isinstance(fid, str) and fid not in seeded_finding_ids:
+                seeded_finding_ids.append(fid)
+        finding_source: Optional[str] = None
+        if fallback_used:
+            if isinstance(fallback_strategy, str) and fallback_strategy:
+                finding_source = fallback_strategy
+            elif fallback_registry_hit:
+                finding_source = "mock_seed"
+            else:
+                finding_source = "fallback"
+        else:
+            finding_source = next(
+                (str(finding.get("source")) for finding in normalized_findings if finding.get("source")),
+                None,
+            )
+        fallback_meta.update(
+            {
+                "used": fallback_used,
+                "strategy": finding_source if fallback_used and finding_source else fallback_strategy,
+                "registry_hit": fallback_registry_hit,
+                "force": fallback_forced,
+                "seeded_ids": seeded_finding_ids,
+            }
+        )
+        normalized["finding_fallback"] = fallback_meta
+        normalized["finding_source"] = finding_source
+
+        if fallback_used:
+            logger.info(
+                "pipeline.fallback.findings",
+                extra={
+                    "case_id": case_id,
+                    "image_id": normalized_image_id,
+                    "strategy": finding_source or fallback_strategy or "unknown",
+                    "registry_hit": fallback_registry_hit,
+                    "seeded_ids": seeded_finding_ids[:3],
+                    "forced": fallback_forced,
+                },
+            )
 
         if debug_enabled:
             debug_blob.update({
@@ -691,6 +773,15 @@ async def analyze(
                 debug_blob["dummy_lookup_source"] = lookup_source
             if not lookup_result and image_id_source != "payload":
                 debug_blob["norm_image_id_warning"] = "dummy_lookup_miss"
+            debug_blob["finding_fallback"] = {
+                "used": fallback_used,
+                "strategy": finding_source if fallback_used else fallback_strategy,
+                "registry_hit": fallback_registry_hit,
+                "forced": fallback_forced,
+                "seeded_ids_head": seeded_finding_ids[:3],
+            }
+            if finding_source:
+                debug_blob["finding_source"] = finding_source
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
@@ -881,6 +972,11 @@ async def analyze(
                     timings["llm_vgl_ms"] = 0
                     results["VGL"] = {"text": "Graph findings unavailable", "latency_ms": 0, "degraded": False}
 
+        if finding_source and isinstance(results.get("VGL"), dict):
+            results["VGL"]["finding_source"] = finding_source
+            if seeded_finding_ids:
+                results["VGL"]["seeded_finding_ids"] = seeded_finding_ids
+
         if debug_enabled:
             debug_blob.setdefault("normalized_image", {
                 "image_id": normalized_image.get("image_id"),
@@ -906,6 +1002,10 @@ async def analyze(
         consensus = compute_consensus(results, weights=weights, min_agree=0.35)
         results["consensus"] = consensus
         debug_blob["consensus"] = consensus
+        if finding_source:
+            results["finding_source"] = finding_source
+        if seeded_finding_ids:
+            results["seeded_finding_ids"] = seeded_finding_ids
 
         # --- Post-consensus safety filter ---
         ORGAN_KEYWORDS = {
@@ -964,6 +1064,8 @@ async def analyze(
             "context_paths": paths_list,
             "consensus": evaluation_consensus,
         }
+        evaluation_payload["finding_source"] = finding_source
+        evaluation_payload["seeded_finding_ids"] = seeded_finding_ids
 
         if debug_enabled:
             debug_blob["evaluation"] = evaluation_payload

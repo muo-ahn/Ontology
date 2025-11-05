@@ -16,7 +16,12 @@ if "py2neo" not in sys.modules:
     errors_stub.ClientError = Exception  # type: ignore[attr-defined]
     sys.modules["py2neo.errors"] = errors_stub
 
-from services.dummy_registry import DummyImageRegistry, LookupResult
+from services.dummy_registry import (
+    DummyFindingRegistry,
+    DummyImageRegistry,
+    FindingStub,
+    LookupResult,
+)
 
 
 def test_normalise_id_adds_separator() -> None:
@@ -55,3 +60,14 @@ def test_resolve_by_path_handles_direct_filename() -> None:
 def test_resolve_by_path_unknown_returns_none() -> None:
     result = DummyImageRegistry.resolve_by_path("/tmp/does-not-exist.png")
     assert result is None
+
+
+def test_dummy_finding_registry_returns_seeded_set() -> None:
+    findings = DummyFindingRegistry.resolve("img201")
+    assert isinstance(findings, list)
+    assert [stub.finding_id for stub in findings] == ["F201", "F202"]
+    assert all(isinstance(stub, FindingStub) for stub in findings)
+
+
+def test_dummy_finding_registry_handles_unknown() -> None:
+    assert DummyFindingRegistry.resolve("unknown") == []
