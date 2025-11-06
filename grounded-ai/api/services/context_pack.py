@@ -127,16 +127,25 @@ def _resolve_path_slots(total: int, explicit: Optional[Dict[str, int]] = None) -
     if total_budget == 0:
         return slots
 
+    baseline = [
+        ("findings", 1),
+        ("reports", 1),
+    ]
     remaining = total_budget
-    slots["findings"] = min(2, remaining)
-    remaining -= slots["findings"]
+    for slot_key, minimum in baseline:
+        if remaining <= 0:
+            break
+        allocation = min(minimum, remaining)
+        slots[slot_key] += allocation
+        remaining -= allocation
 
-    if remaining > 0:
-        slots["reports"] = min(2, remaining)
-        remaining -= slots["reports"]
-
-    if remaining > 0:
-        slots["similarity"] = remaining
+    round_robin_order = ("findings", "reports", "similarity")
+    idx = 0
+    while remaining > 0:
+        slot_key = round_robin_order[idx % len(round_robin_order)]
+        slots[slot_key] += 1
+        remaining -= 1
+        idx += 1
 
     return slots
 
@@ -197,6 +206,8 @@ def _rebalance_slot_limits(slots: Dict[str, int], paths: Sequence[Dict[str, Any]
     for key in secondary:
         if remaining <= 0:
             break
+        if counts.get(key, 0) <= 0:
+            continue
         if rebalanced[key] == 0:
             rebalanced[key] = 1
             remaining -= 1

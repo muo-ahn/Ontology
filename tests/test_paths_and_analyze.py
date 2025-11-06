@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from services.graph_repo import GraphRepo
+from services.dummy_registry import LookupResult
+from services.context_pack import GraphContextBuilder as RealGraphContextBuilder
 from routers import pipeline as pipeline_module
 
 
@@ -45,6 +47,95 @@ _FINDINGS_FIXTURE: List[Dict[str, Any]] = [
         "conf": 0.85,
     },
 ]
+
+
+class _PipelineHarness:
+    def __init__(
+        self,
+        *,
+        lookup: LookupResult,
+        paths_by_slot: Dict[str, List[Dict[str, Any]]],
+        summary_rows: Optional[List[Dict[str, Any]]] = None,
+        facts: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.lookup = lookup
+        self.paths_by_slot: Dict[str, List[Dict[str, Any]]] = {
+            key: [dict(entry) for entry in value] for key, value in paths_by_slot.items()
+        }
+        self.summary_rows = list(summary_rows or [])
+        self.facts = dict(facts or {"image_id": lookup.image_id, "findings": []})
+        self.instances: List[object] = []
+        self.slot_requests: List[Dict[str, int]] = []
+        self.storage_records: Dict[str, set[str]] = {}
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        harness = self
+
+        class StubGraphRepo:
+            def __init__(self) -> None:
+                self._closed = False
+
+            @classmethod
+            def from_env(cls) -> "StubGraphRepo":  # type: ignore[override]
+                instance = cls()
+                harness.instances.append(instance)
+                return instance
+
+            def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+                image = payload.get("image") or {}
+                image_id = str(image.get("image_id") or harness.lookup.image_id)
+                storage_uri = image.get("storage_uri")
+                bucket = harness.storage_records.setdefault(image_id, set())
+                if storage_uri:
+                    bucket.add(str(storage_uri))
+                return {"image_id": image_id, "finding_ids": []}
+
+            def query_bundle(self, image_id: str) -> Dict[str, Any]:
+                bundle_facts = dict(harness.facts)
+                bundle_facts.setdefault("image_id", image_id)
+                bundle_facts.setdefault("findings", [])
+                return {"summary": list(harness.summary_rows), "facts": bundle_facts}
+
+            def query_paths(
+                self,
+                image_id: str,
+                k: int = 2,
+                *,
+                alpha_finding: Optional[float] = None,
+                beta_report: Optional[float] = None,
+                k_slots: Optional[Dict[str, int]] = None,
+            ) -> List[Dict[str, Any]]:
+                slots = {key: int(value) for key, value in (k_slots or {}).items()}
+                harness.slot_requests.append(slots)
+                results: List[Dict[str, Any]] = []
+                for slot_key, entries in harness.paths_by_slot.items():
+                    budget = max(int(slots.get(slot_key, 0)), 0)
+                    if budget <= 0:
+                        continue
+                    for entry in entries[:budget]:
+                        results.append(dict(entry))
+                return results
+
+            def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+                return []
+
+            def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+                return 0
+
+            def close(self) -> None:
+                self._closed = True
+
+        monkeypatch.setattr(pipeline_module, "GraphRepo", StubGraphRepo)
+        monkeypatch.setattr(pipeline_module, "GraphContextBuilder", RealGraphContextBuilder)
+
+        def _resolve_by_path(cls, path: Optional[str]) -> LookupResult:  # type: ignore[override]
+            return harness.lookup
+
+        def _resolve_by_id(cls, raw_id: str) -> LookupResult:  # type: ignore[override]
+            return harness.lookup
+
+        monkeypatch.setattr(pipeline_module.DummyImageRegistry, "resolve_by_path", classmethod(_resolve_by_path))
+        monkeypatch.setattr(pipeline_module.DummyImageRegistry, "resolve_by_id", classmethod(_resolve_by_id))
 
 
 def _cypher_shell_base_cmd() -> List[str]:
@@ -300,7 +391,242 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
     evaluation = payload.get("evaluation") or {}
     evaluation_status = evaluation.get("status") or (evaluation.get("consensus") or {}).get("status")
     assert evaluation_status == "agree"
-@pytest.fixture(scope="session", autouse=True)
+
+
+def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical_id = "IMG201"
+    canonical_uri = "/data/dummy/IMG201.png"
+    lookup_stub = LookupResult(
+        image_id=canonical_id,
+        storage_uri=canonical_uri,
+        modality="US",
+        source="alias",
+    )
+
+    def _fake_resolve_by_path(cls, path: Optional[str]) -> Optional[LookupResult]:  # type: ignore[override]
+        return lookup_stub
+
+    def _fake_resolve_by_id(cls, raw_id: str) -> Optional[LookupResult]:  # type: ignore[override]
+        return lookup_stub
+
+    monkeypatch.setattr(
+        pipeline_module.DummyImageRegistry,
+        "resolve_by_path",
+        classmethod(_fake_resolve_by_path),
+    )
+    monkeypatch.setattr(
+        pipeline_module.DummyImageRegistry,
+        "resolve_by_id",
+        classmethod(_fake_resolve_by_id),
+    )
+
+    graph_repo_instances: List["RecordingGraphRepo"] = []
+
+    class RecordingGraphRepo:
+        def __init__(self) -> None:
+            self.storage_by_id: Dict[str, set[str]] = {}
+
+        @classmethod
+        def from_env(cls) -> "RecordingGraphRepo":  # type: ignore[override]
+            instance = cls()
+            graph_repo_instances.append(instance)
+            return instance
+
+        def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            image = payload.get("image") or {}
+            image_id = image.get("image_id")
+            storage_uri = image.get("storage_uri")
+            if image_id:
+                bucket = self.storage_by_id.setdefault(str(image_id), set())
+                if storage_uri:
+                    bucket.add(str(storage_uri))
+            return {"image_id": image_id, "finding_ids": []}
+
+        def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+            return []
+
+        def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    class RecordingContextBuilder:
+        def __init__(self, repo: RecordingGraphRepo) -> None:
+            self._repo = repo
+
+        def build_bundle(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float] = None,
+            beta_report: Optional[float] = None,
+            k_slots: Optional[Dict[str, int]] = None,
+        ) -> Dict[str, Any]:
+            slot_limits = k_slots or {"findings": k, "reports": 0, "similarity": 0}
+            return {
+                "summary": [],
+                "facts": {"image_id": image_id, "findings": []},
+                "paths": [],
+                "slot_limits": slot_limits,
+                "triples": "",
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pipeline_module, "GraphRepo", RecordingGraphRepo)
+    monkeypatch.setattr(pipeline_module, "GraphContextBuilder", RecordingContextBuilder)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/dummy-img.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 1,
+            "max_chars": 64,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    assert graph_repo_instances, "GraphRepo.from_env was not invoked"
+    repo_instance = graph_repo_instances[-1]
+    storage_entries = repo_instance.storage_by_id.get(canonical_id)
+    assert storage_entries == {canonical_uri}
+
+    debug_blob = payload.get("debug", {})
+    assert debug_blob.get("storage_uri") == canonical_uri
+
+
+def test_pipeline_auto_context_includes_described_by_path(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG201",
+        storage_uri="/data/dummy/IMG201.png",
+        modality="US",
+        source="alias",
+    )
+    paths_by_slot = {
+        "findings": [
+            {
+                "label": "Finding F201",
+                "triples": ["Image[IMG201] -HAS_FINDING-> Finding[F201]"],
+                "score": 0.92,
+            }
+        ],
+        "reports": [
+            {
+                "label": "Report R201",
+                "triples": ["Image[IMG201] -DESCRIBED_BY-> Report[R201]"],
+                "score": 0.85,
+            }
+        ],
+    }
+    summary_rows = [
+        {"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.9},
+        {"rel": "DESCRIBED_BY", "cnt": 1, "avg_conf": 0.82},
+    ]
+    facts = {
+        "image_id": "IMG201",
+        "findings": [
+            {"id": "F201", "type": "nodule", "location": "liver", "conf": 0.9},
+        ],
+    }
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot=paths_by_slot,
+        summary_rows=summary_rows,
+        facts=facts,
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/IMG201.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["V", "VL", "VGL"],
+            "k": 2,
+            "max_chars": 80,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    graph_paths = payload.get("graph_context", {}).get("paths", [])
+    assert graph_paths, "no context paths returned"
+    assert any(
+        any("DESCRIBED_BY" in triple for triple in path.get("triples", []))
+        for path in graph_paths
+    ), f"DESCRIBED_BY path missing: {graph_paths}"
+
+    slot_limits = payload.get("debug", {}).get("context_slot_limits", {})
+    assert slot_limits.get("reports", 0) >= 1
+
+
+def test_pipeline_report_override_parity_matches_auto(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG201",
+        storage_uri="/data/dummy/IMG201.png",
+        modality="US",
+        source="alias",
+    )
+    report_paths = [
+        {
+            "label": "Report R201",
+            "triples": ["Image[IMG201] -DESCRIBED_BY-> Report[R201]"],
+            "score": 0.88,
+        },
+        {
+            "label": "Report R202",
+            "triples": ["Image[IMG201] -DESCRIBED_BY-> Report[R202]"],
+            "score": 0.81,
+        },
+    ]
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot={"reports": report_paths},
+        summary_rows=[{"rel": "DESCRIBED_BY", "cnt": 2, "avg_conf": 0.84}],
+        facts={"image_id": "IMG201", "findings": []},
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    base_payload = {
+        "file_path": "/tmp/IMG201.png",
+        "image_b64": _SAMPLE_IMAGE_B64,
+        "modes": ["VGL"],
+        "k": 2,
+        "max_chars": 80,
+    }
+
+    resp_auto = client.post("/pipeline/analyze", params={"debug": 1}, json=base_payload)
+    assert resp_auto.status_code == 200, resp_auto.text
+    paths_auto = resp_auto.json().get("graph_context", {}).get("paths", [])
+
+    resp_override = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={**base_payload, "parameters": {"k_reports": 2}},
+    )
+    assert resp_override.status_code == 200, resp_override.text
+    paths_override = resp_override.json().get("graph_context", {}).get("paths", [])
+
+    assert paths_auto == paths_override
+@pytest.fixture(scope="session")
 def ensure_dummy_c_seed() -> None:
     if os.getenv("NEO4J_SKIP"):
         pytest.skip("NEO4J_SKIP is set; skipping Neo4j-dependent tests", allow_module_level=True)
@@ -311,6 +637,7 @@ def ensure_dummy_c_seed() -> None:
     _upsert_reference_case()
 
 
+@pytest.mark.usefixtures("ensure_dummy_c_seed")
 def test_query_paths_returns_dense_paths() -> None:
     repo = GraphRepo.from_env()
     try:
@@ -454,6 +781,7 @@ def test_pipeline_analyze_returns_paths_and_consensus(pipeline_app: FastAPI) -> 
     assert isinstance(evaluation.get("similar_seed_images"), list)
 
 
+@pytest.mark.usefixtures("ensure_dummy_c_seed")
 def test_upsert_case_idempotent_by_storage_uri() -> None:
     repo = GraphRepo.from_env()
     storage_uri = "/data/test/idempotent/us999.png"
@@ -498,6 +826,7 @@ def test_upsert_case_idempotent_by_storage_uri() -> None:
         repo.close()
 
 
+@pytest.mark.usefixtures("ensure_dummy_c_seed")
 def test_pipeline_normalises_dummy_id_from_file_path(pipeline_app: FastAPI) -> None:
     client = TestClient(pipeline_app)
     dummy_path = (
