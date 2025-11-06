@@ -133,6 +133,9 @@ def compute_consensus(
     modality: Optional[str] = None,
     weights: Optional[Dict[str, float]] = None,
     min_agree: Optional[float] = None,
+    *,
+    anchor_mode: Optional[str] = None,
+    anchor_min_score: float = 0.75,
 ) -> Dict[str, Any]:
     available: Dict[str, Dict[str, Any]] = {}
     weight_map = {k: float(v) for k, v in (weights or {}).items()}
@@ -235,6 +238,15 @@ def compute_consensus(
             fallback_used = True
 
     penalty_note: Optional[str] = None
+    anchor_mode_used = False
+    if not supporting_modes and anchor_mode and anchor_mode in available:
+        anchor_data = available[anchor_mode]
+        degraded_marker = anchor_data.get("degraded")
+        if not degraded_marker:
+            supporting_modes = [anchor_mode]
+            anchor_mode_used = True
+            agreement_score = max(agreement_score, anchor_min_score)
+
     if supporting_modes:
         conflicted = [mode for mode in supporting_modes if available[mode].get("penalty", 0.0) < 0]
         if conflicted:
@@ -249,16 +261,18 @@ def compute_consensus(
     if supporting_modes:
         preferred = _preferred_mode(supporting_modes) or supporting_modes[0]
         consensus_text = available[preferred]["text"]
-        if agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD:
+        status = "agree"
+        if anchor_mode_used:
+            confidence = "high" if agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD else "medium"
+            notes = "graph-grounded mode dominated consensus"
+        elif agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD:
             confidence = "high"
+            notes = "agreement across requested modes"
         elif fallback_used:
             confidence = "medium"
-        else:
-            confidence = "medium"
-        status = "agree"
-        if fallback_used:
             notes = "weighted agreement favouring grounded evidence"
         else:
+            confidence = "medium"
             notes = "agreement across requested modes"
     else:
         preferred = _preferred_mode(list(available.keys())) or next(iter(available.keys()))
@@ -879,26 +893,39 @@ async def analyze(
             )
 
         no_graph_evidence = False
-        facts: Any = {}
-        paths: Any = []
         findings_list: List[Dict[str, Any]] = []
         paths_list: List[Dict[str, Any]] = []
         ctx_paths_total = 0
+        facts: Dict[str, Any] = {}
         try:
-            facts = (context_bundle.get("facts") or {})
-            paths = (context_bundle.get("paths") or [])
-            
-            if (isinstance(facts.get("findings"), list) and not facts["findings"]) and not paths:
-                no_graph_evidence = (len(finding_ids) == 0) and (len(facts.get("findings") or []) == 0) and (len(paths) == 0)
-
+            raw_facts = context_bundle.get("facts") if isinstance(context_bundle, dict) else {}
+            facts = raw_facts if isinstance(raw_facts, dict) else {}
         except Exception:
-            pass
+            facts = {}
 
-        if isinstance(facts, dict):
-            findings_list = list(facts.get("findings") or [])
-        if isinstance(paths, list):
-            paths_list = list(paths)
+        raw_findings = facts.get("findings") if isinstance(facts, dict) else []
+        if isinstance(raw_findings, list):
+            findings_list = list(raw_findings)
+        elif raw_findings is None:
+            findings_list = []
+        else:
+            findings_list = []
+
+        raw_paths: Any = []
+        try:
+            raw_paths = context_bundle.get("paths") if isinstance(context_bundle, dict) else []
+        except Exception:
+            raw_paths = []
+        if isinstance(raw_paths, list):
+            paths_list = list(raw_paths)
+        else:
+            paths_list = []
+
+        if not findings_list and not paths_list and len(finding_ids) == 0:
+            no_graph_evidence = True
+
         ctx_paths_total = sum(len(path.get("triples") or []) for path in paths_list)
+        has_paths = len(paths_list) > 0
 
         if debug_enabled:
             debug_blob.update({
@@ -959,7 +986,19 @@ async def analyze(
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
                 timings["llm_vgl_ms"] = int((time.perf_counter() - start) * 1000)
                 vgl_result.setdefault("latency_ms", timings["llm_vgl_ms"])
-                if "degraded" not in vgl_result:
+                degraded_marker = vgl_result.get("degraded")
+                degraded_mode: Optional[str] = None
+                if isinstance(degraded_marker, str):
+                    degraded_mode = degraded_marker.strip().upper()
+                elif degraded_marker:
+                    degraded_mode = "VL"
+                if degraded_mode == "VL":
+                    vgl_result["degraded"] = "VL"
+                    fallback_reason = vgl_result.get("reason") or "graph context empty; fell back to VL"
+                    vgl_result.setdefault("reason", fallback_reason)
+                    vgl_fallback_used = True
+                    vgl_fallback_reason = fallback_reason
+                else:
                     vgl_result["degraded"] = False
                 results["VGL"] = vgl_result
             else:
@@ -990,6 +1029,27 @@ async def analyze(
             if seeded_finding_ids:
                 results["VGL"]["seeded_finding_ids"] = seeded_finding_ids
 
+        vgl_entry = results.get("VGL")
+        if has_paths and isinstance(vgl_entry, dict) and not vgl_entry.get("degraded"):
+            vgl_text = vgl_entry.get("text")
+            vgl_norm = _normalise_for_consensus(vgl_text) if isinstance(vgl_text, str) else ""
+            if vgl_norm:
+                for mode_name in ("V", "VL"):
+                    entry = results.get(mode_name)
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("degraded"):
+                        continue
+                    mode_text = entry.get("text")
+                    if not isinstance(mode_text, str) or not mode_text.strip():
+                        entry["degraded"] = "graph_mismatch"
+                        entry.setdefault("notes", "mismatch with graph-backed output")
+                        continue
+                    mode_norm = _normalise_for_consensus(mode_text)
+                    if not mode_norm or _jaccard_similarity(mode_norm, vgl_norm) < 0.1:
+                        entry["degraded"] = "graph_mismatch"
+                        entry.setdefault("notes", "mismatch with graph-backed output")
+
         if debug_enabled:
             debug_blob.setdefault("normalized_image", {
                 "image_id": normalized_image.get("image_id"),
@@ -1004,15 +1064,20 @@ async def analyze(
             debug_blob.setdefault("context_summary", context_bundle.get("summary"))
             debug_blob.setdefault("context_findings_len", len((facts.get("findings") or []) if isinstance(facts, dict) else []))
             debug_blob.setdefault("context_findings_head", (facts.get("findings") or [])[:2] if isinstance(facts, dict) else [])
-            debug_blob.setdefault("context_paths_len", len(paths if isinstance(paths, list) else []))
-            debug_blob.setdefault("context_paths_head", (paths if isinstance(paths, list) else [])[:2])
+            debug_blob.setdefault("context_paths_len", len(paths_list))
+            debug_blob.setdefault("context_paths_head", paths_list[:2])
 
-        has_paths = (debug_blob.get("context_paths_len", 0) or 0) > 0
         weights = {"V": 1.0, "VL": 1.2, "VGL": 1.0}
         if has_paths:
             weights["VGL"] = 1.8
 
-        consensus = compute_consensus(results, weights=weights, min_agree=0.35)
+        consensus = compute_consensus(
+            results,
+            weights=weights,
+            min_agree=0.35,
+            anchor_mode="VGL" if has_paths else None,
+            anchor_min_score=0.75,
+        )
         results["consensus"] = consensus
         debug_blob["consensus"] = consensus
         if vgl_fallback_used:
@@ -1058,7 +1123,9 @@ async def analyze(
             "heart": ["heart", "cardiac"],
         }
 
-        def _infer_expected_from_path(file_path: str):
+        def _infer_expected_from_path(file_path: Optional[str]):
+            if not isinstance(file_path, str) or not file_path:
+                return None
             path_lower = file_path.lower()
             if "brain" in path_lower or "head" in path_lower:
                 return "brain"

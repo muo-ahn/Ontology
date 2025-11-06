@@ -6,7 +6,7 @@ import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 from fastapi import FastAPI
@@ -94,6 +94,212 @@ def _upsert_reference_case() -> None:
         repo.close()
 
 
+def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeGraphRepo:
+        def __init__(self) -> None:
+            self._closed = False
+
+        @classmethod
+        def from_env(cls) -> "FakeGraphRepo":
+            return cls()
+
+        def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            image_payload = payload.get("image") or {}
+            image_id = image_payload.get("image_id", "UNKNOWN")
+            findings = payload.get("findings") or []
+            finding_ids: List[str] = []
+            for idx, finding in enumerate(findings):
+                fid = finding.get("id") if isinstance(finding, dict) else None
+                if not fid:
+                    fid = f"MOCK_F_{idx}"
+                finding_ids.append(str(fid))
+            return {"image_id": image_id, "finding_ids": finding_ids}
+
+        def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+            return []
+
+        def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+            return 0
+
+        def close(self) -> None:
+            self._closed = True
+
+    class FakeContextBuilder:
+        def __init__(self, repo: FakeGraphRepo) -> None:  # pragma: no cover - simple container
+            self._repo = repo
+
+        def build_bundle(self, **_: Any) -> Dict[str, Any]:
+            return {
+                "summary": [],
+                "facts": {"findings": []},
+                "paths": [],
+                "slot_limits": {"findings": 0, "reports": 0, "similarity": 0},
+                "triples": "",
+            }
+
+        def close(self) -> None:
+            return None
+
+    async def degraded_run_vgl_mode(
+        llm: Any,
+        image_id: Optional[str],
+        context_str: str,
+        max_chars: int,
+        fallback_to_vl: bool,
+        normalized: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        assert fallback_to_vl is True
+        return {
+            "text": "No evidence available for (IMAGE_ID)",
+            "latency_ms": 4,
+            "degraded": "VL",
+        }
+
+    monkeypatch.setattr(pipeline_module, "GraphRepo", FakeGraphRepo)
+    monkeypatch.setattr(pipeline_module, "GraphContextBuilder", FakeContextBuilder)
+    monkeypatch.setattr(pipeline_module, "run_vgl_mode", degraded_run_vgl_mode)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "image_id": "US001",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 1,
+            "max_chars": 60,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    results = payload.get("results", {})
+    consensus = results.get("consensus", {})
+
+    assert results.get("status") == "low_confidence"
+    assert consensus.get("status") == "low_confidence"
+    notes = str(consensus.get("notes") or "").lower()
+    assert "graph context empty" in notes or "fell back to vl" in notes
+
+    vgl_text = results.get("VGL", {}).get("text")
+    assert vgl_text == "No evidence available for US001"
+
+
+def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeGraphRepo:
+        def __init__(self) -> None:
+            self._closed = False
+
+        @classmethod
+        def from_env(cls) -> "FakeGraphRepo":
+            return cls()
+
+        def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            image_payload = payload.get("image") or {}
+            image_id = image_payload.get("image_id", "US001")
+            findings = payload.get("findings") or []
+            finding_ids = [
+                str(finding.get("id") or f"MOCK_F_{idx}") for idx, finding in enumerate(findings)
+            ]
+            return {"image_id": image_id, "finding_ids": finding_ids}
+
+        def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+            return []
+
+        def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+            return 0
+
+        def close(self) -> None:
+            self._closed = True
+
+    class FakeContextBuilder:
+        def __init__(self, repo: FakeGraphRepo) -> None:
+            self._repo = repo
+
+        def build_bundle(self, **_: Any) -> Dict[str, Any]:
+            return {
+                "summary": ["[EDGE SUMMARY]", "HAS_FINDING: cnt=1, avg_conf=0.9"],
+                "facts": {
+                    "image_id": "US001",
+                    "findings": [
+                        {
+                            "id": "F201",
+                            "type": "mass",
+                            "location": "liver",
+                            "conf": 0.88,
+                        }
+                    ],
+                },
+                "paths": [
+                    {
+                        "label": "Seed Finding",
+                        "triples": ["Image[US001] -HAS_FINDING-> Finding[F201]"],
+                        "slot": "findings",
+                    }
+                ],
+                "slot_limits": {"findings": 2, "reports": 0, "similarity": 0},
+                "triples": "Image[US001] -HAS_FINDING-> Finding[F201]",
+            }
+
+        def close(self) -> None:
+            return None
+
+    def mismatched_v_mode(normalized: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
+        return {"text": "Chest radiograph shows clear lungs", "latency_ms": 5}
+
+    async def mismatched_vl_mode(llm: Any, normalized: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
+        return {"text": "胸部 X 光片显示无异常阴影。", "latency_ms": 6}
+
+    async def grounded_vgl_mode(
+        llm: Any,
+        image_id: Optional[str],
+        context_str: str,
+        max_chars: int,
+        fallback_to_vl: bool,
+        normalized: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        assert fallback_to_vl is True
+        return {"text": "Focal hepatic lesion remains stable at 2.1 cm (EVIDENCE).", "latency_ms": 7, "degraded": False}
+
+    monkeypatch.setattr(pipeline_module, "GraphRepo", FakeGraphRepo)
+    monkeypatch.setattr(pipeline_module, "GraphContextBuilder", FakeContextBuilder)
+    monkeypatch.setattr(pipeline_module, "run_v_mode", mismatched_v_mode)
+    monkeypatch.setattr(pipeline_module, "run_vl_mode", mismatched_vl_mode)
+    monkeypatch.setattr(pipeline_module, "run_vgl_mode", grounded_vgl_mode)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "image_id": "US001",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["V", "VL", "VGL"],
+            "k": 2,
+            "max_chars": 80,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    results = payload.get("results", {})
+    assert results.get("V", {}).get("degraded") == "graph_mismatch"
+    assert results.get("VL", {}).get("degraded") == "graph_mismatch"
+
+    consensus = results.get("consensus", {})
+    assert consensus.get("status") == "agree"
+    assert consensus.get("agreement_score", 0) >= 0.6
+    notes = str(consensus.get("notes") or "")
+    assert "graph-grounded mode" in notes
+
+    evaluation = payload.get("evaluation") or {}
+    evaluation_status = evaluation.get("status") or (evaluation.get("consensus") or {}).get("status")
+    assert evaluation_status == "agree"
 @pytest.fixture(scope="session", autouse=True)
 def ensure_dummy_c_seed() -> None:
     if os.getenv("NEO4J_SKIP"):
@@ -120,7 +326,12 @@ def test_query_paths_returns_dense_paths() -> None:
 
 @pytest.fixture()
 def pipeline_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    async def fake_normalize_from_vlm(file_path: str | None, image_id: str | None, vlm_runner: Any) -> Dict[str, Any]:
+    async def fake_normalize_from_vlm(
+        file_path: str | None,
+        image_id: str | None,
+        vlm_runner: Any,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         findings_payload = deepcopy(_FINDINGS_FIXTURE)
         report_ts = datetime.now(timezone.utc).isoformat()
         caption = "Focal hepatic lesion with satellite nodule."
