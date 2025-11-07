@@ -50,6 +50,16 @@
 > `VGL이 V/VL 대비 평균 일관성 +X%, 환각률 -Y% (더미셋 기준)`
 > (실험 실행 후 `scripts/run_eval.py` 결과로 X/Y를 채워 넣으세요.)
 
+### 0. pipeline/analyze
+```sh
+./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" "{}"
+```
+or
+```sh
+./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" "{"force_dummy_fallback": true}"
+```
+
+
 ### 1. 건강 상태 확인
 ```sh
 curl http://localhost:8000/health

@@ -716,30 +716,35 @@ async def analyze(
                 for stub in seeded_stubs
             ]
 
+        # Preserve whatever the normalizer decided; we only ever augment this blob to avoid
+        # clobbering evidence about seeded findings during later normalization passes.
         fallback_meta = dict(normalized.get("finding_fallback") or {})
         fallback_used = bool(fallback_meta.get("used"))
         fallback_strategy = fallback_meta.get("strategy")
         fallback_registry_hit = bool(fallback_meta.get("registry_hit"))
         fallback_forced = bool(fallback_meta.get("force")) or force_dummy_fallback
 
+        seeded_applied = False
         if (force_dummy_fallback or not normalized_findings) and seeded_records:
             normalized_findings = dedup_findings(seeded_records)
+            seeded_applied = True
             fallback_used = True
             fallback_registry_hit = True
-            fallback_strategy = "mock_seed"
+            if not fallback_strategy:
+                fallback_strategy = "mock_seed"
 
         normalized["findings"] = normalized_findings
 
-        fallback_meta = dict(normalized.get("finding_fallback") or {})
-        fallback_used = bool(fallback_meta.get("used"))
-        fallback_strategy = fallback_meta.get("strategy")
-        fallback_registry_hit = bool(fallback_meta.get("registry_hit"))
-        fallback_forced = bool(fallback_meta.get("force")) or force_dummy_fallback
         seeded_finding_ids: List[str] = []
         for finding in normalized_findings:
             fid = finding.get("id")
             if finding.get("source") == "mock_seed" and isinstance(fid, str) and fid not in seeded_finding_ids:
                 seeded_finding_ids.append(fid)
+        if seeded_applied and not seeded_finding_ids:
+            seeded_finding_ids = [
+                stub.get("id") for stub in seeded_records if isinstance(stub.get("id"), str)
+            ]
+
         finding_source: Optional[str] = None
         if fallback_used:
             if isinstance(fallback_strategy, str) and fallback_strategy:
