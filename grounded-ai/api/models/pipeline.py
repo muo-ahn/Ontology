@@ -66,6 +66,12 @@ class DummyEvaluation(BaseModel):
     confidence: str = "low"
     context_paths: List[Dict[str, Any]] = Field(default_factory=list)
     consensus: Dict[str, Any] = Field(default_factory=dict)
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    finding_source: Optional[str] = None
+    seeded_finding_ids: List[str] = Field(default_factory=list)
+    finding_fallback: Dict[str, Any] = Field(default_factory=dict)
+    finding_provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalyzeResp(BaseModel):
@@ -80,3 +86,5 @@ class AnalyzeResp(BaseModel):
     errors: List[Dict[str, str]] = Field(default_factory=list)
     debug: Dict[str, Any] = Field(default_factory=dict)
     evaluation: Optional[DummyEvaluation] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None

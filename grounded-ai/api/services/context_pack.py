@@ -85,6 +85,56 @@ def _build_evidence_paths(paths: Sequence[Dict[str, Any]]) -> List["EvidencePath
     return evidence_paths
 
 
+def _build_fallback_path_rows(
+    image_id: str,
+    facts_payload: Dict[str, Any],
+    slot_limits: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """Synthesize simple path rows when the graph query fails to surface any."""
+    rows: List[Dict[str, Any]] = []
+    findings_budget = max(int(slot_limits.get("findings", 0)), 0)
+    if findings_budget <= 0:
+        return rows
+
+    findings = []
+    if isinstance(facts_payload, dict):
+        findings = facts_payload.get("findings") or []
+    image_token = str(image_id or facts_payload.get("image_id") or "").strip() or "UNKNOWN"
+
+    for finding in findings:
+        if findings_budget <= 0:
+            break
+        if not isinstance(finding, dict):
+            continue
+        fid = str(
+            finding.get("id")
+            or finding.get("finding_id")
+            or finding.get("uid")
+            or f"FALLBACK_{len(rows)+1}"
+        )
+        label = str(finding.get("type") or finding.get("label") or f"Finding[{fid}]")
+        location = str(finding.get("location") or "").strip()
+        triples = [
+            f"Image[{image_token}] -HAS_FINDING-> Finding[{fid}]",
+        ]
+        if location:
+            triples.append(f"Finding[{fid}] -LOCATED_IN-> Anatomy[{location}]")
+        score_raw = finding.get("conf")
+        try:
+            score = float(score_raw) if score_raw is not None else 0.5
+        except (TypeError, ValueError):
+            score = 0.5
+        rows.append({
+            "slot": "findings",
+            "label": label,
+            "triples": triples,
+            "score": score,
+        })
+        findings_budget -= 1
+
+    return rows
+
+
 def _sanitise_slot_values(explicit: Optional[Dict[str, int]]) -> Dict[str, int]:
     if not explicit:
         return {}
@@ -150,6 +200,31 @@ def _resolve_path_slots(total: int, explicit: Optional[Dict[str, int]] = None) -
     return slots
 
 
+def _ensure_finding_slot_floor(slots: Dict[str, int], min_required: int) -> Dict[str, int]:
+    """Guarantee that the findings slot keeps a non-zero allocation when findings exist."""
+    normalised = {key: max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS}
+    required = max(int(min_required), 0)
+    if required == 0 or normalised.get("findings", 0) >= required:
+        return normalised
+
+    deficit = required - normalised.get("findings", 0)
+    donors = ("similarity", "reports")
+    for donor in donors:
+        available = normalised.get(donor, 0)
+        if available <= 0:
+            continue
+        take = min(available, deficit)
+        normalised[donor] = available - take
+        normalised["findings"] = normalised.get("findings", 0) + take
+        deficit -= take
+        if deficit <= 0:
+            break
+
+    if deficit > 0:
+        normalised["findings"] = normalised.get("findings", 0) + deficit
+    return normalised
+
+
 def _dedupe_path_rows(paths: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
@@ -173,10 +248,15 @@ def _dedupe_path_rows(paths: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return deduped
 
 
-def _rebalance_slot_limits(slots: Dict[str, int], paths: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+def _rebalance_slot_limits(
+    slots: Dict[str, int],
+    paths: Sequence[Dict[str, Any]],
+    *,
+    findings_floor: int = 0,
+) -> Dict[str, int]:
     total = sum(max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
     if total <= 0:
-        return slots
+        return _ensure_finding_slot_floor(slots, findings_floor)
 
     counts: Dict[str, int] = {key: 0 for key in _PATH_SLOT_KEYS}
     for row in paths:
@@ -223,7 +303,7 @@ def _rebalance_slot_limits(slots: Dict[str, int], paths: Sequence[Dict[str, Any]
         remaining -= 1
         idx += 1
 
-    return rebalanced
+    return _ensure_finding_slot_floor(rebalanced, findings_floor)
 
 
 def _extract_relation(token: str) -> Optional[str]:
@@ -373,12 +453,17 @@ class GraphContextBuilder:
 
         current_k = requested_k
         slot_overrides = dict(k_slots or {})
+        findings_floor = 1 if len(facts.findings) > 0 else 0
 
-        def _render(current_paths: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        def _render(
+            current_paths: Sequence[Dict[str, Any]],
+            slots_snapshot: Dict[str, int],
+        ) -> Dict[str, Any]:
             effective_summary_rows = _augment_summary_rows(summary_rows, current_paths, facts_payload)
             summary_text_local = _format_edge_summary(effective_summary_rows)
             evidence_paths = _build_evidence_paths(current_paths)
-            evidence_section = self._format_evidence_section(evidence_paths)
+            expected_paths = sum(max(int(slots_snapshot.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
+            evidence_section = self._format_evidence_section(evidence_paths, expected_paths)
             sections = [
                 summary_text_local,
                 evidence_section,
@@ -396,7 +481,10 @@ class GraphContextBuilder:
         paths_rows: Sequence[Dict[str, Any]] = []
         rendered_bundle: Dict[str, Any] = {}
         final_slot_limits: Dict[str, int] = {}
-        slot_limits = _resolve_path_slots(current_k, slot_overrides)
+        slot_limits = _ensure_finding_slot_floor(
+            _resolve_path_slots(current_k, slot_overrides),
+            findings_floor,
+        )
         attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
         deduped_rows: List[Dict[str, Any]] = []
         while True:
@@ -413,6 +501,10 @@ class GraphContextBuilder:
                 k_slots=slot_limits,
             )
             paths_rows = _dedupe_path_rows(raw_paths)
+            if not paths_rows:
+                fallback_rows = _build_fallback_path_rows(image_id, facts_payload, slot_limits)
+                if fallback_rows:
+                    paths_rows = fallback_rows
 
             total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
             desired_paths = total_budget if current_k <= 0 else min(current_k, total_budget or current_k)
@@ -421,16 +513,23 @@ class GraphContextBuilder:
                 and desired_paths > 0
                 and len(paths_rows) < desired_paths
             ):
-                rebalanced = _rebalance_slot_limits(slot_limits, paths_rows)
+                rebalanced = _rebalance_slot_limits(
+                    slot_limits,
+                    paths_rows,
+                    findings_floor=findings_floor,
+                )
                 if rebalanced != slot_limits:
                     slot_limits = rebalanced
                     continue
 
-            rendered = _render(paths_rows)
+            rendered = _render(paths_rows, slot_limits)
             triples_text = rendered["triples_text"]
             if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
                 current_k -= 1
-                slot_limits = _resolve_path_slots(current_k, slot_overrides)
+                slot_limits = _ensure_finding_slot_floor(
+                    _resolve_path_slots(current_k, slot_overrides),
+                    findings_floor,
+                )
                 attempted_slot_configs.clear()
                 continue
 
@@ -479,10 +578,15 @@ class GraphContextBuilder:
             "summary_rows": final_summary_rows,
         }
 
-    def _format_evidence_section(self, paths: Sequence["EvidencePath"]) -> str:
+    def _format_evidence_section(
+        self,
+        paths: Sequence["EvidencePath"],
+        expected_total: int = 0,
+    ) -> str:
         lines = ["[EVIDENCE PATHS (Top-k)]"]
         if not paths:
-            lines.append("데이터 없음")
+            suffix = f" (0/{expected_total})" if expected_total > 0 else ""
+            lines.append(f"No path generated{suffix}")
             return "\n".join(lines)
         for idx, path in enumerate(paths, start=1):
             slot_prefix = f"[{path.slot}] " if path.slot else ""
@@ -548,8 +652,12 @@ class ContextPackBuilder:
         summary_rows = bundle_payload.get("summary", [])
         facts_payload = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
         facts = ContextFacts(**facts_payload)
+        findings_floor = 1 if len(facts.findings) > 0 else 0
 
-        slot_limits = _resolve_path_slots(k_value, k_slots)
+        slot_limits = _ensure_finding_slot_floor(
+            _resolve_path_slots(k_value, k_slots),
+            findings_floor,
+        )
         attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
         final_deduped_rows: List[Dict[str, Any]] = []
         while True:
@@ -560,6 +668,14 @@ class ContextPackBuilder:
 
             path_rows = self._repo.query_paths(image_id, k_value, k_slots=slot_limits)
             deduped_rows = _dedupe_path_rows(path_rows)
+            if not deduped_rows:
+                fallback_rows = _build_fallback_path_rows(
+                    image_id or str(facts.image_id),
+                    facts_payload,
+                    slot_limits,
+                )
+                if fallback_rows:
+                    deduped_rows = fallback_rows
             final_deduped_rows = deduped_rows
             total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
             desired_paths = total_budget if k_value <= 0 else min(k_value, total_budget or k_value)
@@ -568,7 +684,11 @@ class ContextPackBuilder:
                 and desired_paths > 0
                 and len(deduped_rows) < desired_paths
             ):
-                rebalanced = _rebalance_slot_limits(slot_limits, deduped_rows)
+                rebalanced = _rebalance_slot_limits(
+                    slot_limits,
+                    deduped_rows,
+                    findings_floor=findings_floor,
+                )
                 if rebalanced != slot_limits:
                     slot_limits = rebalanced
                     continue

@@ -14,6 +14,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
+import hashlib
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -349,6 +350,23 @@ def _slugify(value: str) -> str:
     return cleaned[:48]
 
 
+def _compute_cache_seed(payload: AnalyzeReq) -> Optional[str]:
+    if payload.file_path:
+        return os.path.abspath(payload.file_path)
+    if payload.image_id:
+        candidate = payload.image_id.strip()
+        if candidate:
+            return candidate
+    if payload.image_b64:
+        digest = hashlib.sha1(payload.image_b64.encode("utf-8")).hexdigest()
+        return f"b64:{digest}"
+    if payload.idempotency_key:
+        candidate = payload.idempotency_key.strip()
+        if candidate:
+            return candidate
+    return None
+
+
 def _derive_image_id_from_path(path: Optional[str]) -> Tuple[Optional[str], Optional[LookupResult]]:
     if not path:
         return None, None
@@ -484,11 +502,15 @@ async def analyze(
     }
     errors: List[Dict[str, str]] = []
     current_stage = "init"
+    overall_status: Optional[str] = None
+    overall_notes: Optional[str] = None
+    graph_degraded = False
     graph_repo: Optional[GraphRepo] = None
     context_builder: Optional[GraphContextBuilder] = None
     debug_blob: Dict[str, Any] = {"stage": "init"}
     param_overrides: Dict[str, Any] = dict(payload.parameters or {})
     force_dummy_fallback = _is_truthy(param_overrides.get("force_dummy_fallback"))
+    normalization_cache_seed = _compute_cache_seed(payload) if debug_enabled else None
 
     def _resolve_int_param(
         primary: Optional[int],
@@ -592,6 +614,8 @@ async def analyze(
                 image_id=payload.image_id,
                 vlm_runner=vlm,
                 force_dummy_fallback=force_dummy_fallback,
+                cache_seed=normalization_cache_seed,
+                enable_cache=debug_enabled,
             )
         if debug_enabled:
             debug_blob["stage"] = current_stage
@@ -758,17 +782,28 @@ async def analyze(
                 (str(finding.get("source")) for finding in normalized_findings if finding.get("source")),
                 None,
             )
-        fallback_meta.update(
-            {
-                "used": fallback_used,
-                "strategy": finding_source if fallback_used and finding_source else fallback_strategy,
-                "registry_hit": fallback_registry_hit,
-                "force": fallback_forced,
-                "seeded_ids": seeded_finding_ids,
-            }
-        )
+        if not finding_source and seeded_finding_ids:
+            finding_source = "mock_seed"
+        elif not finding_source and normalized_findings:
+            finding_source = "vlm"
+
+        public_fallback = {
+            "used": fallback_used,
+            "strategy": finding_source if fallback_used and finding_source else fallback_strategy,
+            "registry_hit": fallback_registry_hit,
+            "forced": fallback_forced,
+            "seeded_ids": list(seeded_finding_ids),
+        }
+        fallback_meta.update(dict(public_fallback))
+        fallback_meta["seeded_ids_head"] = seeded_finding_ids[:3]
         normalized["finding_fallback"] = fallback_meta
         normalized["finding_source"] = finding_source
+        provenance_payload = {
+            "finding_source": finding_source,
+            "seeded_finding_ids": list(seeded_finding_ids),
+            "finding_fallback": dict(public_fallback),
+        }
+        normalized["finding_provenance"] = dict(provenance_payload)
 
         if fallback_used:
             logger.info(
@@ -803,15 +838,11 @@ async def analyze(
                 debug_blob["dummy_lookup_source"] = lookup_source
             if not lookup_result and image_id_source != "payload":
                 debug_blob["norm_image_id_warning"] = "dummy_lookup_miss"
-            debug_blob["finding_fallback"] = {
-                "used": fallback_used,
-                "strategy": finding_source if fallback_used else fallback_strategy,
-                "registry_hit": fallback_registry_hit,
-                "forced": fallback_forced,
-                "seeded_ids_head": seeded_finding_ids[:3],
-            }
+            debug_blob["finding_fallback"] = dict(public_fallback, seeded_ids_head=seeded_finding_ids[:3])
             if finding_source:
                 debug_blob["finding_source"] = finding_source
+            debug_blob["seeded_finding_ids"] = list(seeded_finding_ids)
+            debug_blob["finding_provenance"] = dict(provenance_payload)
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
@@ -863,8 +894,13 @@ async def analyze(
             persisted_f_cnt = len(upsert_receipt.get("finding_ids") or [])
         except Exception:
             pass
-        if debug and len(normalized_findings) > 0 and persisted_f_cnt == 0:
+        upsert_missing_ids = len(normalized_findings) > 0 and persisted_f_cnt == 0
+        if upsert_missing_ids and debug:
             errors.append({"stage": "upsert", "msg": "normalized findings present but upsert returned no finding_ids"})
+        if upsert_missing_ids:
+            graph_degraded = True
+            overall_status = "degraded"
+            overall_notes = "graph upsert failed, fallback used"
 
         if graph_repo is not None:
             current_stage = "similarity"
@@ -916,6 +952,27 @@ async def analyze(
         else:
             findings_list = []
 
+        if graph_degraded and not findings_list and normalized_findings:
+            fallback_findings: List[Dict[str, Any]] = []
+            for idx, finding in enumerate(normalized_findings, start=1):
+                if not isinstance(finding, dict):
+                    continue
+                fid = str(finding.get("id") or finding.get("finding_id") or f"FALLBACK_{idx}")
+                fallback_findings.append({
+                    "id": fid,
+                    "type": finding.get("type"),
+                    "location": finding.get("location"),
+                    "size_cm": finding.get("size_cm"),
+                    "conf": finding.get("conf"),
+                })
+            if fallback_findings:
+                findings_list = fallback_findings
+                facts = dict(facts or {})
+                facts.setdefault("image_id", image_id)
+                facts["findings"] = fallback_findings
+                if isinstance(context_bundle, dict):
+                    context_bundle["facts"] = facts
+
         raw_paths: Any = []
         try:
             raw_paths = context_bundle.get("paths") if isinstance(context_bundle, dict) else []
@@ -928,9 +985,22 @@ async def analyze(
 
         if not findings_list and not paths_list and len(finding_ids) == 0:
             no_graph_evidence = True
+        elif graph_degraded and not findings_list and normalized_findings:
+            findings_list = list(normalized_findings)
+            facts = dict(facts or {})
+            facts.setdefault("image_id", image_id)
+            facts["findings"] = findings_list
+            if isinstance(context_bundle, dict):
+                context_bundle["facts"] = facts
 
         ctx_paths_total = sum(len(path.get("triples") or []) for path in paths_list)
         has_paths = len(paths_list) > 0
+
+        if isinstance(context_bundle, dict):
+            context_bundle.setdefault("finding_source", finding_source)
+            context_bundle.setdefault("seeded_finding_ids", list(seeded_finding_ids))
+            context_bundle.setdefault("finding_fallback", dict(public_fallback))
+            context_bundle.setdefault("finding_provenance", dict(provenance_payload))
 
         if debug_enabled:
             debug_blob.update({
@@ -947,6 +1017,8 @@ async def analyze(
                 "similarity_threshold": similarity_threshold,
                 "similarity_candidates_considered": similarity_candidates_debug,
             })
+            if graph_degraded:
+                debug_blob["graph_degraded"] = True
 
         results: Dict[str, Dict[str, Any]] = {}
 
@@ -1119,6 +1191,8 @@ async def analyze(
             results["finding_source"] = finding_source
         if seeded_finding_ids:
             results["seeded_finding_ids"] = seeded_finding_ids
+        results["finding_fallback"] = dict(public_fallback)
+        results["finding_provenance"] = dict(provenance_payload)
 
         # --- Post-consensus safety filter ---
         ORGAN_KEYWORDS = {
@@ -1172,6 +1246,7 @@ async def analyze(
         evaluation_consensus["text"] = _replace_image_tokens(evaluation_consensus.get("text"), image_id) or ""
         evaluation_consensus["notes"] = _replace_image_tokens(evaluation_consensus.get("notes"), image_id) if evaluation_consensus.get("notes") else evaluation_consensus.get("notes")
 
+        evaluation_status = "degraded" if graph_degraded else results.get("consensus", {}).get("status")
         evaluation_payload = {
             "image_id": image_id,
             "similar_seed_images": similar_seed_images,
@@ -1182,9 +1257,15 @@ async def analyze(
             "context_paths": paths_list,
             "consensus": evaluation_consensus,
         }
-        evaluation_payload["status"] = results.get("consensus", {}).get("status")
+        evaluation_payload["status"] = evaluation_status
+        if graph_degraded and overall_notes:
+            evaluation_payload["notes"] = overall_notes
+        elif evaluation_consensus.get("notes"):
+            evaluation_payload["notes"] = evaluation_consensus.get("notes")
         evaluation_payload["finding_source"] = finding_source
         evaluation_payload["seeded_finding_ids"] = seeded_finding_ids
+        evaluation_payload["finding_fallback"] = dict(public_fallback)
+        evaluation_payload["finding_provenance"] = dict(provenance_payload)
 
         if debug_enabled:
             debug_blob["evaluation"] = evaluation_payload
@@ -1200,6 +1281,10 @@ async def analyze(
             "debug": debug_blob if debug_enabled else {},
             "evaluation": evaluation_payload,
         }
+        if overall_status:
+            response["status"] = overall_status
+        if overall_notes:
+            response["notes"] = overall_notes
 
         return AnalyzeResp(**response)
 

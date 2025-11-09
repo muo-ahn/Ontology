@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -232,6 +233,8 @@ async def normalize_from_vlm(
     vlm_runner: VLMRunner,
     *,
     force_dummy_fallback: bool = False,
+    cache_seed: Optional[str] = None,
+    enable_cache: bool = False,
 ) -> Dict[str, Any]:
     """Call the VLM and return a normalised payload shared across endpoints."""
 
@@ -241,6 +244,13 @@ async def normalize_from_vlm(
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(os.fspath(path))
+
+    cache_key: Optional[str] = None
+    if enable_cache and cache_seed:
+        cache_key = f"v1::{cache_seed}::force={int(force_dummy_fallback)}"
+        cached_payload = _load_cached_normalized(cache_key)
+        if cached_payload:
+            return cached_payload
 
     image_bytes = path.read_bytes()
 
@@ -346,6 +356,8 @@ async def normalize_from_vlm(
         "strategy": fallback_strategy if fallback_used else None,
         "force": force_dummy_fallback,
     }
+    if cache_key:
+        _store_cached_normalized(cache_key, normalized)
     return normalized
 
 
@@ -358,3 +370,42 @@ __all__ = [
     "_fallback_findings_from_caption",
     "clamp_one_line",
 ]
+_CACHE_VERSION = 1
+_CACHE_ENV_VAR = "VISION_DEBUG_CACHE_DIR"
+
+
+def _cache_dir() -> Path:
+    root = os.getenv(_CACHE_ENV_VAR)
+    directory = Path(root) if root else Path(".vision_cache")
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _cache_path(seed: str) -> Path:
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    return _cache_dir() / f"normalized_{digest}.json"
+
+
+def _load_cached_normalized(seed: str) -> Optional[Dict[str, Any]]:
+    path = _cache_path(seed)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    if payload.get("_cache_version") != _CACHE_VERSION:
+        return None
+    payload.pop("_cache_version", None)
+    payload["raw_vlm"] = {"cached": True}
+    return payload
+
+
+def _store_cached_normalized(seed: str, normalized: Dict[str, Any]) -> None:
+    path = _cache_path(seed)
+    cache_payload = deepcopy(normalized)
+    cache_payload.pop("raw_vlm", None)
+    cache_payload["_cache_version"] = _CACHE_VERSION
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(cache_payload, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)

@@ -142,3 +142,106 @@ async def test_normalize_from_vlm_forced_fallback(tmp_path: Path) -> None:
     }
     findings = normalized.get("findings") or []
     assert [item.get("id") for item in findings] == ["F201", "F202"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_from_vlm_cache_seed_reuses_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setenv("VISION_DEBUG_CACHE_DIR", str(cache_dir))
+    image_path = tmp_path / "cache_img.png"
+    image_path.write_bytes(b"\x89PNG")
+
+    class RecordingRunner(DummyVLMRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, image_bytes: bytes, prompt: str, task: str) -> dict:  # type: ignore[override]
+            assert task == self.Task.CAPTION
+            self.calls += 1
+            return {
+                "output": json.dumps(
+                    {
+                        "image": {"image_id": "IMG-CACHE", "modality": "US"},
+                        "report": {"text": f"call-{self.calls}", "model": "dummy-vlm"},
+                        "findings": [
+                            {"id": f"raw-{self.calls}", "type": "lesion", "location": "liver", "conf": 0.9}
+                        ],
+                    }
+                ),
+                "latency_ms": 5,
+                "model": "dummy-vlm",
+            }
+
+    runner = RecordingRunner()
+    first = await normalize_from_vlm(
+        file_path=str(image_path),
+        image_id="IMG-CACHE",
+        vlm_runner=runner,
+        cache_seed="IMG-CACHE",
+        enable_cache=True,
+    )
+    second = await normalize_from_vlm(
+        file_path=str(image_path),
+        image_id="IMG-CACHE",
+        vlm_runner=runner,
+        cache_seed="IMG-CACHE",
+        enable_cache=True,
+    )
+
+    assert runner.calls == 1, "cached call should not invoke the VLM twice"
+    assert second.get("raw_vlm") == {"cached": True}
+    assert first["findings"] == second["findings"]
+    cache_files = list(cache_dir.glob("normalized_*.json"))
+    assert cache_files, "cache file was not materialized on disk"
+
+
+@pytest.mark.asyncio
+async def test_normalize_from_vlm_cache_key_includes_force_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_dir = tmp_path / "cache_force"
+    monkeypatch.setenv("VISION_DEBUG_CACHE_DIR", str(cache_dir))
+    image_path = tmp_path / "force_img.png"
+    image_path.write_bytes(b"\x89PNG")
+
+    class CountingRunner(DummyVLMRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, image_bytes: bytes, prompt: str, task: str) -> dict:  # type: ignore[override]
+            self.calls += 1
+            return {
+                "output": json.dumps(
+                    {
+                        "image": {"image_id": "IMG-FORCE", "modality": "CT"},
+                        "report": {"text": "force check", "model": "dummy-vlm"},
+                        "findings": [{"id": f"raw-{self.calls}", "type": "lesion", "location": "liver", "conf": 0.9}],
+                    }
+                ),
+                "latency_ms": 3,
+                "model": "dummy-vlm",
+            }
+
+    runner = CountingRunner()
+    await normalize_from_vlm(
+        file_path=str(image_path),
+        image_id="IMG-FORCE",
+        vlm_runner=runner,
+        cache_seed="IMG-FORCE",
+        enable_cache=True,
+        force_dummy_fallback=False,
+    )
+    await normalize_from_vlm(
+        file_path=str(image_path),
+        image_id="IMG-FORCE",
+        vlm_runner=runner,
+        cache_seed="IMG-FORCE",
+        enable_cache=True,
+        force_dummy_fallback=True,
+    )
+
+    assert runner.calls == 2, "force flag should produce independent cache entries"

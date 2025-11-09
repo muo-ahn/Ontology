@@ -37,6 +37,14 @@
   - 조건: `context_findings_len > 0`
   - 기대값: slot_limits.findings ≥ 1
 
+### ✅ Verification (2025-11-08)
+
+- `python -m pytest tests/test_paths_and_analyze.py -k slot_limits_keep_findings_when_summary_has_findings`
+  - harness 기반 케이스에서 `debug.context_slot_limits.findings >= 1` ??검증 완료.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" "{}"`
+  - 실 서비스 IMG201 런??`context_slot_limits: {"findings":1,"reports":1,"similarity":0}` 로그로 교차 확인.
+- findings??존재하지 않는 XR/CT 케이스(예: IMG_001, IMG_003)는 `context_findings_len=0` → spec에 따라 findings 슬롯 0 유지.
+
 ---
 
 ## S02. Evidence Path 미노출
@@ -59,6 +67,15 @@
 - Test Case:
 
   - Dummy Graph에 최소 2-step edge 존재 시 `context_paths_len >= 1`.
+
+### ✅ Verification (2025-11-08)
+
+- `python -m pytest tests/test_paths_and_analyze.py -k builds_fallback_paths_when_graph_returns_none`
+  - repo path 조회 결과가 비어도 fallback evidence path가 생성되어 `context_paths_len > 0`이 보장됨.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" "{}"`
+  - 실 런타임(IMG201)에서 `[EVIDENCE PATHS (Top-k)]`가 실제 path를 surface 함.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Acute-fatty-liver-of-pregnancy-non-contrast-computed-tomography-Non-contrast-computed.png" "{}"`
+  - 그래프 evidence가 전무한 CT 케이스에서는 `[EVIDENCE PATHS]`에 `No path generated (0/2)` 메시지가 출력되어 빈 상태가 명시됨.
 
 ---
 
@@ -88,6 +105,13 @@
 
   - IMG_001 케이스 재실행 시 `"status": "degraded"` 표시되어야 함.
   - `데이터가 없습니다.` 문구 금지.
+
+### ✅ Verification (2025-11-08)
+
+- `python -m pytest tests/test_paths_and_analyze.py -k marks_degraded_when_upsert_returns_no_ids`
+  - upsert가 finding ID를 반환하지 못하면 `status="degraded"`와 fallback note가 노출됨을 단위 테스트로 보장.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Acute-fatty-liver-of-pregnancy-non-contrast-computed-tomography-Non-contrast-computed.png" "{}"`
+  - 실 런에서 `status":"degraded"`, `notes:"graph upsert failed, fallback used"`가 응답/평가 블록에 포함되고 `graph_context.facts.findings`가 정규화 finding 으로 채워짐을 확인.
 
 ---
 
@@ -122,8 +146,17 @@
 
 - Test:
 
-  - `force_dummy_fallback=false`일 때 used=False.
-  - 동일 run 내 모든 endpoint 결과에서 값이 일치해야 함.
+- `force_dummy_fallback=false`일 때 used=False.
+- 동일 run 내 모든 endpoint 결과에서 값이 일치해야 함.
+
+### ✅ Verification (2025-11-08)
+
+- `python -m pytest tests/test_paths_and_analyze.py -k provenance_metadata_aligns_across_sections`
+  - graph_context, results, evaluation, debug 전 구간에서 `finding_source`, `seeded_finding_ids`, `finding_fallback`이 동일하게 노출됨을 보장.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" '{"force_dummy_fallback": true}'`
+  - fallback 강제 시 [8]/[9]/[10-1] 모든 블록에서 `finding_source:"mock_seed"`, `seeded_finding_ids`, `finding_fallback.used=true`가 일치함을 확인.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Acute-fatty-liver-of-pregnancy-non-contrast-computed-tomography-Non-contrast-computed.png" "{}"`
+  - 그래프 degraded 경로에서도 `finding_source:"vlm"`, `finding_fallback.used=false`, `finding_provenance` 값이 graph_context/results/evaluation/debug 전 구간에 동일하게 나타남을 확인.
 
 ---
 
@@ -136,6 +169,8 @@
   ```bash
   curl -X POST ... -d '{"file_path":"...","force_dummy_fallback":true}'
   ```
+
+  ↳ Bash에서는 JSON 전체를 `'...'`로 감싸거나 내부 따옴표를 escape 해야 함.
 
 - 서버에서:
 
@@ -163,8 +198,17 @@
 
 - Test:
 
-  - JSON decode error 제거.
-  - [8] 블록의 `forced: true` 정상 출력.
+  - JSON decode error 제거 (jq 기반 shell 테스트 포함).
+  - [8] 블록의 `forced: true` 정상 출력 & [10-1] 응답에도 반영됨.
+
+### ✅ Verification (2025-11-08)
+
+- `python -m pytest tests/test_paths_and_analyze.py -k provenance_metadata_aligns_across_sections` (force_dummy_fallback 시)
+  - fallback 강제 시 `finding_fallback.used=true`와 `finding_source:"mock_seed"`가 graph_context/results/evaluation/debug 전 구간에 존재함을 확인.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" '{"force_dummy_fallback": true}'`
+  - JSON 인코딩 오류 없이 요청 수락, [8]/[9]/[10-1] 모두에서 `finding_fallback.forced:true` 노출.
+
+---
 
 ---
 
@@ -194,6 +238,11 @@
 
   - 동일 이미지 3회 실행 시 `pre_upsert_findings_head` 완전 동일해야 함.
 
+### ✅ Verification (2025-11-08)
+
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" "{}"` 두 번 실행 → `[8]`과 `[10-1]`의 `pre_upsert_findings_head`가 동일하게 캐시됨.
+- 같은 커맨드에 `{"force_dummy_fallback": true}`를 전달한 반복 실행에서도 seed 기반 findings 순서가 바뀌지 않음을 확인.
+
 ---
 
 ## S07. Consensus 모듈 개선
@@ -221,6 +270,15 @@
 - Test:
 
   - 최소 1개 케이스에서 `status=agree`, `confidence=medium` 이상 확인.
+
+### ⚠️ Status (2025-11-08)
+
+- `services/evaluation.py` 및 `routers/pipeline.py` 합의 스코어링 로직은 아직 갱신되지 않아 S07은 **Pending** 상태입니다.
+- pytest 커버리지(agree 시나리오)와 `vision_pipeline_debug.sh` 샘플 로그도 미비하므로 아래 순서로 작업해야 합니다.
+  1. 그래프 evidence 가중치와 `>0.35` threshold/bonus를 consensus 계산에 반영.
+  2. `tests/test_paths_and_analyze.py` 등에 "status=agree, confidence=medium"을 검증하는 케이스 추가.
+  3. IMG201 등의 실제 로그를 문서에 캡처하여 0 < agreement_score ≤ 1인 예시 확보.
+
 
 ---
 

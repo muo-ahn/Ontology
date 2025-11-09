@@ -575,6 +575,219 @@ def test_pipeline_auto_context_includes_described_by_path(
     assert slot_limits.get("reports", 0) >= 1
 
 
+def test_pipeline_slot_limits_keep_findings_when_summary_has_findings(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG777",
+        storage_uri="/data/dummy/IMG777.png",
+        modality="US",
+        source="alias",
+    )
+    paths_by_slot = {
+        "reports": [
+            {
+                "label": "Report node",
+                "triples": ["Image[IMG777] -DESCRIBED_BY-> Report[R77]"],
+                "score": 0.8,
+            }
+        ],
+        "similarity": [
+            {
+                "label": "Neighbor IMG770",
+                "triples": ["Image[IMG777] -SIMILAR_TO-> Image[IMG770]"],
+                "score": 0.7,
+            }
+        ],
+    }
+    facts = {
+        "image_id": "IMG777",
+        "findings": [
+            {"id": "F777", "type": "lesion", "location": "liver", "conf": 0.91},
+        ],
+    }
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot=paths_by_slot,
+        summary_rows=[
+            {"rel": "DESCRIBED_BY", "cnt": 1, "avg_conf": 0.8},
+            {"rel": "SIMILAR_TO", "cnt": 1, "avg_conf": 0.7},
+        ],
+        facts=facts,
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/IMG777.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 3,
+            "max_chars": 80,
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    slot_limits = payload.get("debug", {}).get("context_slot_limits", {})
+    assert slot_limits.get("findings", 0) >= 1
+
+
+def test_pipeline_builds_fallback_paths_when_graph_returns_none(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG888",
+        storage_uri="/data/dummy/IMG888.png",
+        modality="CT",
+        source="alias",
+    )
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot={},  # Simulate graph query returning no explicit paths
+        summary_rows=[{"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.88}],
+        facts={
+            "image_id": "IMG888",
+            "findings": [
+                {"id": "F888", "type": "lesion", "location": "liver", "conf": 0.92},
+            ],
+        },
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/IMG888.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["V"],
+            "k": 2,
+            "max_chars": 80,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    debug_blob = payload.get("debug", {})
+    assert debug_blob.get("context_paths_len", 0) >= 1
+    graph_paths = payload.get("graph_context", {}).get("paths", [])
+    assert graph_paths, "fallback builder failed to surface any evidence paths"
+    assert any("HAS_FINDING" in triple for triple in graph_paths[0].get("triples", []))
+    triples_block = payload.get("graph_context", {}).get("triples", "")
+    assert "No path generated" not in triples_block
+
+
+def test_pipeline_marks_degraded_when_upsert_returns_no_ids(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG999",
+        storage_uri="/data/dummy/IMG999.png",
+        modality="XR",
+        source="alias",
+    )
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot={},
+        summary_rows=[],
+        facts={"image_id": "IMG999", "findings": []},
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/IMG999.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["V", "VGL"],
+            "k": 2,
+            "max_chars": 80,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload.get("status") == "degraded"
+    assert "graph upsert failed" in (payload.get("notes") or "")
+    facts = payload.get("graph_context", {}).get("facts", {})
+    assert isinstance(facts.get("findings"), list) and len(facts["findings"]) > 0
+    evaluation = payload.get("evaluation", {})
+    assert evaluation.get("status") == "degraded"
+    assert "graph upsert failed" in (evaluation.get("notes") or "")
+
+
+def test_pipeline_provenance_metadata_aligns_across_sections(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG201",
+        storage_uri="/data/dummy/IMG201.png",
+        modality="US",
+        source="alias",
+    )
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot={
+            "findings": [
+                {
+                    "label": "Seeded finding",
+                    "triples": ["Image[IMG201] -HAS_FINDING-> Finding[SEED_1]"],
+                    "score": 0.9,
+                }
+            ]
+        },
+        summary_rows=[{"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.9}],
+        facts={"image_id": "IMG201", "findings": []},
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/IMG201.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 2,
+            "max_chars": 80,
+            "parameters": {"force_dummy_fallback": True},
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    graph_ctx = payload.get("graph_context", {})
+    results = payload.get("results", {})
+    evaluation = payload.get("evaluation", {})
+    debug_blob = payload.get("debug", {})
+
+    graph_source = graph_ctx.get("finding_source")
+    assert graph_source
+    assert graph_source == results.get("finding_source") == evaluation.get("finding_source")
+
+    seeded_ids = graph_ctx.get("seeded_finding_ids")
+    assert isinstance(seeded_ids, list) and seeded_ids
+    assert seeded_ids == results.get("seeded_finding_ids") == evaluation.get("seeded_finding_ids")
+
+    fallback_graph = graph_ctx.get("finding_fallback")
+    assert isinstance(fallback_graph, dict) and fallback_graph.get("used") is True
+    assert fallback_graph == results.get("finding_fallback")
+    assert fallback_graph == evaluation.get("finding_fallback")
+
+    debug_fallback = debug_blob.get("finding_fallback") or {}
+    assert debug_fallback.get("used") is True
+    assert set(debug_blob.get("seeded_finding_ids") or []) == set(seeded_ids)
+    provenance_context = graph_ctx.get("finding_provenance") or {}
+    assert provenance_context.get("finding_source") == graph_source
+    assert provenance_context == results.get("finding_provenance")
+    assert provenance_context == evaluation.get("finding_provenance")
+
+
 def test_pipeline_report_override_parity_matches_auto(
     pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
