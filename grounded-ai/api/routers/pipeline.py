@@ -13,7 +13,6 @@ from itertools import combinations
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional, Set, Tuple
-from uuid import uuid4
 import hashlib
 
 import httpx
@@ -22,9 +21,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from models.pipeline import AnalyzeResp
 from services.context_pack import GraphContextBuilder
-from services.dummy_registry import DummyFindingRegistry, DummyImageRegistry, LookupResult
+from services.dummy_registry import DummyFindingRegistry
 from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
+from services.image_identity import ImageIdentityError, identify_image
 from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
 from services.similarity import compute_similarity_scores
@@ -500,13 +500,6 @@ def _is_truthy(value: object) -> bool:
     return False
 
 
-def _slugify(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
-    if not cleaned:
-        cleaned = uuid4().hex[:12]
-    return cleaned[:48]
-
-
 def _compute_cache_seed(payload: AnalyzeReq) -> Optional[str]:
     if payload.file_path:
         return os.path.abspath(payload.file_path)
@@ -522,73 +515,6 @@ def _compute_cache_seed(payload: AnalyzeReq) -> Optional[str]:
         if candidate:
             return candidate
     return None
-
-
-def _derive_image_id_from_path(path: Optional[str]) -> Tuple[Optional[str], Optional[LookupResult]]:
-    if not path:
-        return None, None
-
-    lookup = DummyImageRegistry.resolve_by_path(path)
-    if lookup:
-        return lookup.image_id, lookup
-
-    stem = Path(path).stem
-    alnum = re.sub(r"[^A-Za-z0-9]+", "", stem)
-    if not alnum:
-        return None, None
-    return alnum.upper()[:48], None
-
-
-def _resolve_seed_storage_uri(
-    file_path: Optional[str],
-    image_id: Optional[str],
-    preferred: Optional[str] = None,
-) -> Optional[str]:
-    if preferred:
-        candidate = preferred.strip()
-        if candidate:
-            return candidate
-    if not file_path:
-        return None
-    path = Path(file_path)
-    raw = str(path)
-    if raw.startswith("/mnt/data/medical_dummy/") or raw.startswith("/data/dummy/"):
-        return raw
-
-    suffix = path.suffix.lower()
-    if not suffix:
-        suffix = ".png"
-    stem = path.stem
-    normalized_id = (image_id or "").strip().upper()
-    stem_upper = stem.upper()
-
-    if re.match(r"^IMG_\d+$", normalized_id):
-        return f"/mnt/data/medical_dummy/images/{normalized_id.lower()}{suffix}"
-    if re.match(r"^IMG_\d+$", stem_upper):
-        return f"/mnt/data/medical_dummy/images/{stem.lower()}{suffix}"
-
-    if re.match(r"^IMG\d+$", normalized_id):
-        return f"/data/dummy/{normalized_id}{suffix}"
-    if re.match(r"^IMG\d+$", stem_upper):
-        return f"/data/dummy/{stem_upper}{suffix}"
-
-    if re.match(r"^(CT|US|XR)\d+$", normalized_id):
-        return f"/data/dummy/{normalized_id}{suffix}"
-    if re.match(r"^(CT|US|XR)\d+$", stem_upper):
-        return f"/data/dummy/{stem_upper}{suffix}"
-
-    if stem.lower().startswith("img_"):
-        return f"/mnt/data/medical_dummy/images/{stem.lower()}{suffix}"
-
-    return raw
-
-
-def _resolve_case_id(payload: AnalyzeReq, image_path: Optional[str], image_id: str) -> str:
-    if payload.case_id:
-        return payload.case_id
-    seed = payload.idempotency_key or image_id or (Path(image_path).stem if image_path else None) or uuid4().hex[:12]
-    slug = _slugify(str(seed))
-    return f"CASE_{slug.upper()}"
 
 
 def _read_image_bytes(payload: AnalyzeReq) -> tuple[bytes, Optional[str]]:
@@ -785,72 +711,31 @@ async def analyze(
                 pass
 
         normalized_image = dict(normalized.get("image") or {})
-        normalized_image_id = normalized_image.get("image_id")
-        lookup_result: Optional[LookupResult] = None
-        lookup_source: Optional[str] = None
-        image_id_source = "normalizer"
         resolved_path = payload.file_path or image_path
-
-        if payload.image_id:
-            try:
-                normalized_image_id = DummyImageRegistry.normalise_id(payload.image_id)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail="image_id must not be blank") from exc
-            image_id_source = "payload"
-        else:
-            derived_image_id, lookup_candidate = _derive_image_id_from_path(resolved_path)
-            if derived_image_id:
-                normalized_image_id = derived_image_id
-                if lookup_candidate:
-                    lookup_result = lookup_candidate
-                    lookup_source = lookup_candidate.source
-                    image_id_source = "dummy_lookup"
-                else:
-                    image_id_source = "file_path"
-
-        if not normalized_image_id:
-            raise HTTPException(status_code=502, detail="unable to derive image identifier")
-
         try:
-            normalized_image_id = DummyImageRegistry.normalise_id(str(normalized_image_id))
-        except ValueError as exc:
-            raise HTTPException(status_code=502, detail="unable to derive image identifier") from exc
+            identity, normalized_image = identify_image(
+                payload=payload,
+                normalized_image=normalized_image,
+                resolved_path=resolved_path,
+                image_path=image_path,
+            )
+        except ImageIdentityError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-        if not lookup_result:
-            lookup_result = DummyImageRegistry.resolve_by_id(normalized_image_id)
-            if lookup_result:
-                lookup_source = lookup_result.source
-                if image_id_source != "payload":
-                    image_id_source = "dummy_lookup"
-
-        image_id = normalized_image_id
-        case_id = _resolve_case_id(payload, image_path, image_id)
-        final_image_path = image_path or payload.file_path or normalized_image.get("path")
-        lookup_storage_uri = lookup_result.storage_uri if lookup_result else None
-        storage_uri = _resolve_seed_storage_uri(resolved_path, normalized_image_id, preferred=lookup_storage_uri)
-        if not storage_uri:
-            storage_uri = normalized_image.get("storage_uri")
-        if not storage_uri and final_image_path:
-            storage_uri = _resolve_seed_storage_uri(final_image_path, normalized_image_id)
-            if not storage_uri:
-                storage_uri = str(final_image_path)
-        if storage_uri and isinstance(storage_uri, str):
-            storage_uri = storage_uri.strip() or None
-
-        if lookup_result and lookup_result.modality and not normalized_image.get("modality"):
-            normalized_image["modality"] = lookup_result.modality
-
-        storage_uri_key = os.path.basename(storage_uri) if storage_uri else None
-        if not storage_uri_key and resolved_path:
-            storage_uri_key = os.path.basename(str(resolved_path))
-        if storage_uri_key:
-            storage_uri_key = storage_uri_key.strip() or None
+        image_id = identity.image_id
+        case_id = identity.case_id
+        image_id_source = identity.image_id_source
+        lookup_result = identity.lookup_result
+        lookup_source = identity.lookup_source
+        storage_uri = identity.storage_uri or normalized_image.get("storage_uri")
+        storage_uri_key = identity.storage_uri_key or normalized_image.get("storage_uri_key")
+        final_image_path = normalized_image.get("path")
 
         logger.info(
             "pipeline.normalize.image_id",
             extra={
                 "case_id": case_id,
-                "image_id": normalized_image_id,
+                "image_id": image_id,
                 "image_id_source": image_id_source,
                 "image_path": resolved_path,
                 "storage_uri_key": storage_uri_key,
@@ -859,14 +744,6 @@ async def analyze(
             },
         )
 
-        normalized_image.update({
-            "image_id": image_id,
-            "path": final_image_path,
-        })
-        if storage_uri:
-            normalized_image["storage_uri"] = storage_uri
-        if storage_uri_key:
-            normalized_image["storage_uri_key"] = storage_uri_key
         normalized["image"] = normalized_image
 
         normalized_report = dict(normalized.get("report") or {})
@@ -1480,3 +1357,4 @@ async def analyze(
             context_builder.close()
         if graph_repo is not None:
             graph_repo.close()
+

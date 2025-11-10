@@ -285,6 +285,47 @@
 
 ---
 
+## S08. Image Identity 서비스 예외 처리 미비
+
+### Expected Behavior
+
+- `/pipeline/analyze` 는 어떤 입력이라도 `image_id`/`case_id` 를 결정하거나, 실패 시 사용자 친화적인 JSON 오류를 반환해야 한다.
+- normalizer 가 image_id 를 채우지 못했고 Dummy registry alias/ID lookup 도 실패한 경우:
+  - `identify_image()` 가 `ImageIdentityError(status_code=502, "unable to derive image identifier")` 를 발생시켜야 한다.
+  - FastAPI 응답에는 NameError 등 내부 스택이 노출되면 안 된다.
+
+### Repro (2025-11-11)
+
+```bash
+./scripts/vision_pipeline_debug.sh \
+  "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" \
+  '{"force_dummy_fallback": true}'
+```
+
+- `[8] Vision Pipeline Debug Query` 가 `null` 로 표시되고, sync 호출은 아래 오류를 리턴
+
+```json
+{"detail":{"ok":false,"errors":[{"stage":"vlm","msg":"name 'normalized_image_id' is not defined"}]}}
+```
+
+### Root Cause
+
+- `services/image_identity.identify_image()` 리팩터 도입 후, normalizer + alias lookup 모두 miss 하면 `normalized_image_id` 지역 변수가 생성되지 않은 채 사용된다.
+- Dummy registry 가 alias 를 찾지 못한 경우 filename 기반 slug 를 재시도하지 않아 NameError 가 노출된다.
+
+### Remediation Plan
+
+1. `identify_image()` 내부에서 `normalized_image_id = working_image.get("image_id")` 값을 항상 초기화하고, 모든 파생 로직 이후에도 값이 없으면 `ImageIdentityError` 로 종료.
+2. Path slug fallback (예: 파일명 → `IMG_ULTRASOUND_...`) 을 추가해 alias miss 시에도 deterministic ID 확보.
+3. `tests/test_image_identity.py` 에 alias miss + slug fallback 케이스, 그리고 “ID 미생성 시 ImageIdentityError 발생” 케이스를 추가.
+4. 위 재현 스크립트를 다시 실행해 `case_id":"CASE_IMG_...` 형태로 정상 응답이 나오는지 검증.
+
+### Status
+
+- **미해결 (Fix TODO)** — 서비스 가드/테스트 추가 필요.
+
+---
+
 ## 5. Verification Plan
 
 | Step | Command                                       | Expected Output                 | Related Spec |
