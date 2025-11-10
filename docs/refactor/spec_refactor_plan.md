@@ -1,4 +1,4 @@
-# 🧩 Ontology Spec-Driven Refactor Plan
+﻿# 🧩 Ontology Spec-Driven Refactor Plan
 
 > 목적: 연구용 코드(main)를 “명세 기반 시스템(spec-driven system)”으로 정리하여
 > reproducible experiment + paper appendix + team collaboration 에 모두 적합한 구조로 만들기.
@@ -173,13 +173,13 @@ Properties:
 
 ## VII. README 업데이트 항목
 
-* ✅ **Non-production Disclaimer**
+* DONE **Non-production Disclaimer**
 
   > 본 저장소는 의료 영상 데이터를 이용한 연구용 실험 코드이며, 실제 임상 환경에서 사용되어서는 안 됩니다.
-* ✅ **System Diagram**
+* DONE **System Diagram**
 
   * Vision Encoder → Caption → Graph Upsert → Context Pack → LLM Answer → Consensus
-* ✅ **Spec References**
+* DONE **Spec References**
 
   * [docs/refactor/graph_schema.md](docs/refactor/graph_schema.md)
   * [docs/refactor/pipeline_modes.md](docs/refactor/pipeline_modes.md)
@@ -190,19 +190,21 @@ Properties:
 
 | 단계 | 내용                                | 상태 |
 | -- | --------------------------------- | -- |
-| 1  | pipeline 기능 모듈 분리                 | ☐  |
-| 2  | Pydantic 모델 통일                    | ☐  |
-| 3  | GRAPH_SCHEMA/PIPELINE_MODES 문서 추가 | ✅ (docs/refactor/* 작성 완료) |
-| 4  | 테스트 스냅샷 확립                        | ☐  |
-| 5  | README + disclaimer 보강            | ✅ (루트 README 업데이트) |
+| 1  | pipeline 기능 모듈 분리                 | TODO  |
+| 2  | Pydantic 모델 통일                    | TODO  |
+| 3  | GRAPH_SCHEMA/PIPELINE_MODES 문서 추가 | DONE (docs/refactor/* 작성 완료) |
+| 4  | 테스트 스냅샷 확립                        | TODO  |
+| 5  | README + disclaimer 보강            | DONE (루트 README 업데이트) |
 
 ### Schema fixes (Issues A–C)
 
 | ID | 조치 | 진행 상황 | 근거 |
 | -- | --- | --- | --- |
-| A (`Image` 제약) | `schema/v1_1/constraints.cypher` 에 `img.image_id` 제약 추가, 모든 seed/migration 에서 동일 키 사용 | ✅ | grounded-ai/schema/v1_1/constraints.cypher, scripts/cyphers/load_all.cypher |
-| B (IMG_002 모달리티) | seed + CSV 에서 modality/caption 수정, migration 에서 `IMG_002` 메타 보정 | ✅ | grounded-ai/scripts/cyphers/seed.cypher, data/medical_dummy/imaging.csv, schema/v1_1/migrations_up.cypher |
-| C (version vs version_id) | `AIInference.version_id` 필드 통일, CSV + loader + migration 업데이트, RECORDED_WITH 관계 보장 | ✅ | data/medical_dummy/ai_inference.csv, scripts/cyphers/load_all.cypher, schema/v1_1/migrations_up.cypher |
+| A (`Image` 제약) | `schema/v1_1/constraints.cypher` 에 `img.image_id` 제약 추가, 모든 seed/migration 에서 동일 키 사용 | DONE | grounded-ai/schema/v1_1/constraints.cypher, scripts/cyphers/load_all.cypher |
+| B (IMG_002 모달리티) | seed + CSV 에서 modality/caption 수정, migration 에서 `IMG_002` 메타 보정 | DONE | grounded-ai/scripts/cyphers/seed.cypher, data/medical_dummy/imaging.csv, schema/v1_1/migrations_up.cypher |
+| C (version vs version_id) | `AIInference.version_id` 필드 통일, CSV + loader + migration 업데이트, RECORDED_WITH 관계 보장 | DONE | data/medical_dummy/ai_inference.csv, scripts/cyphers/load_all.cypher, schema/v1_1/migrations_up.cypher |
+
+Graph schema docs now also capture the persisted `GraphPath` node contract and the corrected `SIMILAR_TO` sample query (`docs/refactor/graph_schema.md`) to close the lingering schema-fix gap.
 
 ---
 

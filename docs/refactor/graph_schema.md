@@ -15,6 +15,7 @@
 | `Report` | `report_id`, `summary` | `author`, `summary_length` | 텍스트 리포트 |
 | `OntologyVersion` | `version_id`, `released_at` | `notes` | 그래프 스키마/업서트 버전 |
 | `AIInference` | `inference_id`, `version_id`, `created_at` | `mode`, `agreement_score` | 파이프라인 추론 결과 |
+| `GraphPath` | `path_id`, `triples` | `slot`, `score`, `seed_image_id` | Persisted graph path snapshot |
 
 ---
 
@@ -29,8 +30,8 @@
 | `(:AIInference)-[:BACKED_BY]->(:GraphPath)` | Inference → Path | `weight` | 그래프 근거 |
 | `(:AIInference)-[:USES_VERSION]->(:OntologyVersion)` | Inference → Version | 없음 | 버전 추적 |
 
-`GraphPath` 는 물리적 노드가 아니라 path snapshot 를 저장하는 가상 노드(label `GraphPath`)로, `path_id` 와
-`triples` 배열 속성을 갖는다.
+`GraphPath` nodes persist context/evidence paths with required `path_id` and `triples` (string list).
+Optional `slot`, `score`, and `seed_image_id` fields capture ranking context so `AIInference` evidence can be replayed or audited.
 
 ---
 
@@ -83,8 +84,11 @@ LIMIT $max_paths;
 ### 5.2 Similar Image Expansion
 
 ```cypher
-MATCH (seed:Image {image_id: $image_id})-[:SIMILAR_TO]->(sim:Image)
-RETURN sim.image_id, sim.modality, sim.storage_uri, sim_score
+MATCH (seed:Image {image_id: $image_id})-[rel:SIMILAR_TO]->(sim:Image)
+RETURN sim.image_id AS similar_id,
+       sim.modality,
+       sim.storage_uri,
+       rel.score AS sim_score
 ORDER BY sim_score DESC
 LIMIT $k_similarity;
 ```

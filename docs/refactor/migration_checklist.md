@@ -6,9 +6,9 @@
 
 ## Legend
 
-- ✅ 완료
-- 🚧 진행 중
-- ☐ 미착수
+- DONE - completed
+- WIP - in progress
+- TODO - not started
 
 ---
 
@@ -16,9 +16,9 @@
 
 | 상태 | 작업 | 완료 조건 | 검증 |
 | --- | --- | --- | --- |
-| ✅ | Image 제약 통일 | `seed.cypher` 가 `MERGE (img {image_id:…})` 사용, constraint `img.image_id` | `pytest tests/integration/test_graph_migrations.py` |
-| ✅ | 모달리티/캡션 정합성 | Seed 데이터 검토 및 IMG_002 수정 | `rg "IMG_002" seed.cypher` + reviewer 확인 |
-| ✅ | version 필드 통일 | `AIInference.version_id` 로 필드명 변경, Neo4j data migrate | Cypher migration + unit tests |
+| DONE | Image 제약 통일 | `seed.cypher` 가 `MERGE (img {image_id:…})` 사용, constraint `img.image_id` | `pytest tests/integration/test_graph_migrations.py` |
+| DONE | 모달리티/캡션 정합성 | Seed 데이터 검토 및 IMG_002 수정 | `rg "IMG_002" seed.cypher` + reviewer 확인 |
+| DONE | version 필드 통일 | `AIInference.version_id` 로 필드명 변경, Neo4j data migrate | Cypher migration + unit tests |
 
 ---
 
@@ -26,10 +26,10 @@
 
 | 상태 | 작업 | 완료 조건 | 검증 |
 | --- | --- | --- | --- |
-| ☐ | `image_identity.py` 생성 | 서비스/테스트/DI wiring 완료 | `pytest tests/test_image_identity.py` |
-| ☐ | `context_orchestrator.py` 생성 | GraphBundle Typed 반환 | `pytest tests/test_context_orchestrator.py` |
-| ☐ | `consensus.py` + 모드 합의 | 가중치/투표 로직 구현, snapshot test 추가 | `pytest tests/test_consensus_snapshot.py` |
-| ☐ | `debug_payload.py` | 디버그 JSON 스키마 문서화 | Response schema diff |
+| TODO | `image_identity.py` 생성 | 서비스/테스트/DI wiring 완료 | `pytest tests/test_image_identity.py` |
+| TODO | `context_orchestrator.py` 생성 | GraphBundle Typed 반환 | `pytest tests/test_context_orchestrator.py` |
+| TODO | `consensus.py` + 모드 합의 | 가중치/투표 로직 구현, snapshot test 추가 | `pytest tests/test_consensus_snapshot.py` |
+| TODO | `debug_payload.py` | 디버그 JSON 스키마 문서화 | Response schema diff |
 
 ---
 
@@ -37,8 +37,8 @@
 
 | 상태 | 작업 | 완료 조건 | 검증 |
 | --- | --- | --- | --- |
-| 🚧 | docs/refactor/* 작성 | `architecture`, `module_specs`, `graph_schema`, `pipeline_modes`, `testing_strategy` | Docs lint/확인 |
-| ☐ | README 업데이트 | Disclaimer, 시스템 다이어그램, spec 링크 | `markdownlint README.md` |
+| WIP | docs/refactor/* 작성 | `architecture`, `module_specs`, `graph_schema`, `pipeline_modes`, `testing_strategy` | Docs lint/확인 |
+| TODO | README 업데이트 | Disclaimer, 시스템 다이어그램, spec 링크 | `markdownlint README.md` |
 
 ---
 
@@ -46,9 +46,9 @@
 
 | 상태 | 작업 | 완료 조건 | 검증 |
 | --- | --- | --- | --- |
-| ☐ | pytest 스냅샷 infra | `--update-golden` 플래그 구현 | Snapshot tests |
-| ☐ | GitHub Actions Workflow | lint + unit + nightly integration | Workflow run |
-| ☐ | Seed regression guard | nightly job + alert | CI logs |
+| TODO | pytest 스냅샷 infra | `--update-golden` 플래그 구현 | Snapshot tests |
+| TODO | GitHub Actions Workflow | lint + unit + nightly integration | Workflow run |
+| TODO | Seed regression guard | nightly job + alert | CI logs |
 
 ---
 
@@ -56,9 +56,9 @@
 
 | 상태 | 작업 | 완료 조건 | 검증 |
 | --- | --- | --- | --- |
-| ☐ | Healthcheck 모듈화 | `/healthz` 가 LLM/Vision/Neo4j 상태 리턴 | curl healthz |
-| ☐ | Debug artifact 저장 | `artifacts/debug_payload/*.json` 업로드 | CI artifact |
-| ☐ | Telemetry 필드 표준화 | `trace_id`, `image_id`, `mode` 필수 포함 | 로그 샘플 |
+| TODO | Healthcheck 모듈화 | `/healthz` 가 LLM/Vision/Neo4j 상태 리턴 | curl healthz |
+| TODO | Debug artifact 저장 | `artifacts/debug_payload/*.json` 업로드 | CI artifact |
+| TODO | Telemetry 필드 표준화 | `trace_id`, `image_id`, `mode` 필수 포함 | 로그 샘플 |
 
 ---
 
