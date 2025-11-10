@@ -94,7 +94,7 @@ def _load_imaging_rows() -> Dict[str, Dict[str, Optional[str]]]:
     with _IMAGING_FILE.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for raw in reader:
-            image_id = raw.get("id")
+            image_id = raw.get("image_id") or raw.get("id")
             if not image_id:
                 continue
             canonical_id = DummyImageRegistry.normalise_id(image_id)

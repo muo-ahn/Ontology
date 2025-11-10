@@ -40,7 +40,7 @@ MATCH (e:Encounter {encounter_id: r.encounter_id})
 MERGE (e)-[:HAS_RX]->(m);
 
 LOAD CSV WITH HEADERS FROM 'file:///imaging.csv' AS r
-MERGE (i:Image {image_id: r.id})
+MERGE (i:Image {image_id: r.image_id})
 SET i.modality = r.modality, i.file_path = r.file_path, i.caption_hint = r.caption_hint
 WITH r, i
 MATCH (e:Encounter {encounter_id: r.encounter_id})
@@ -48,8 +48,16 @@ MERGE (e)-[:HAS_IMAGE]->(i);
 
 LOAD CSV WITH HEADERS FROM 'file:///ai_inference.csv' AS r
 MERGE (a:AIInference {inference_id: r.inference_id})
-SET a.model = r.model, a.task = r.task, a.output = r.output, a.confidence = toFloat(r.confidence), a.timestamp = r.timestamp
+SET a.model = r.model,
+    a.task = r.task,
+    a.output = r.output,
+    a.confidence = toFloat(r.confidence),
+    a.timestamp = r.timestamp,
+    a.version_id = coalesce(r.version_id, '1.1')
 WITH r, a
-MATCH (i:Image {image_id: r.id})
+MATCH (i:Image {image_id: r.image_id})
 MERGE (i)-[h:HAS_INFERENCE]->(a)
-ON CREATE SET h.confidence = toFloat(r.confidence), h.at = r.timestamp;
+ON CREATE SET h.confidence = toFloat(r.confidence), h.at = r.timestamp
+WITH r, a
+MERGE (ov:OntologyVersion {version_id: coalesce(r.version_id, '1.1')})
+MERGE (a)-[:RECORDED_WITH]->(ov);

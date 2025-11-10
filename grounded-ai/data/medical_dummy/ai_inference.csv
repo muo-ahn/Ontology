@@ -1,4 +1,4 @@
-inference_id,id,encounter_id,model,model_version,task,output,confidence,timestamp,source_type,source_reference
-AI00001,IMG_001,E0003,llava-1.5-7b,v1.0,caption,Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.,0.91,2025-10-10T12:00:00,observation,O00004
-AI00002,IMG_002,E0006,llava-1.5-7b,v1.0,caption,Abdominal ultrasound – fatty liver pattern. No gallstones visualized.,0.85,2025-10-10T12:00:00,procedure,PR0003
-AI00003,IMG_003,E0005,qwen2-vl:2b,v0.9,caption,"ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.",0.79,2025-10-10T12:00:00,observation,O00003
+inference_id,image_id,encounter_id,model,model_version,task,output,confidence,timestamp,source_type,source_reference,version_id
+AI00001,IMG_001,E0003,llava-1.5-7b,v1.0,caption,Chest X-ray – probable right upper lobe nodule (~1.8 cm). Recommend CT follow-up.,0.91,2025-10-10T12:00:00,observation,O00004,1.1
+AI00002,IMG_002,E0006,llava-1.5-7b,v1.0,caption,Abdominal ultrasound – fatty liver pattern. No gallstones visualized.,0.85,2025-10-10T12:00:00,procedure,PR0003,1.1
+AI00003,IMG_003,E0005,qwen2-vl:2b,v0.9,caption,"ECG snapshot – sinus tachycardia (~110 bpm), no ST elevation.",0.79,2025-10-10T12:00:00,observation,O00003,1.1

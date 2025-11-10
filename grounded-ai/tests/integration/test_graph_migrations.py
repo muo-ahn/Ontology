@@ -9,7 +9,7 @@ from neo4j import GraphDatabase, basic_auth
 
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema" / "v1_1"
-SEED_FILE = Path(__file__).resolve().parents[2] / "scripts" / "seed.cypher"
+SEED_FILE = Path(__file__).resolve().parents[2] / "scripts" / "cyphers" / "seed.cypher"
 
 
 def _load_statements(path: Path) -> list[str]:
@@ -112,6 +112,25 @@ def test_migration_and_seed_apply_successfully(neo4j_driver, clean_database):
             "MATCH (v:OntologyVersion {version_id: '1.1'}) RETURN count(v) AS cnt"
         ).single()["cnt"]
         assert version_node == 1
+
+        legacy_image_ids = session.run(
+            "MATCH (img:Image) WHERE exists(img.id) RETURN count(img) AS cnt"
+        ).single()["cnt"]
+        assert legacy_image_ids == 0
+
+        img002_check = session.run(
+            """
+            MATCH (img:Image {image_id:'IMG_002'})
+            RETURN img.modality AS modality, img.caption_hint AS caption
+            """
+        ).single()
+        assert img002_check["modality"] == "US"
+        assert "ultrasound" in (img002_check["caption"] or "").lower()
+
+        legacy_ai_versions = session.run(
+            "MATCH (ai:AIInference) WHERE exists(ai.version) RETURN count(ai) AS cnt"
+        ).single()["cnt"]
+        assert legacy_ai_versions == 0
 
 
 def test_migration_down_rolls_back(neo4j_driver, clean_database):

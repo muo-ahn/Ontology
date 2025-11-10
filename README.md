@@ -1,5 +1,9 @@
 # 🧠 Ontology × vLM × LLM Prototype
 
+> ⚠️ **Non-production Disclaimer**  
+> 본 저장소는 의료 영상 데이터를 이용한 연구용 실험 코드이며, 실제 임상 환경에서 사용되어서는 안 됩니다.  
+> 코드를 실행하는 경우, 출력은 연구 참고용으로만 활용해 주세요.
+
 ## Overview
 이 프로젝트는 **LLM이 데이터의 의미를 이해하도록 만드는 방법**을 탐구한다.  
 단순한 텍스트 예측을 넘어서, 실제 세계의 구조를 **Ontology(의미 관계)** 와 **vLM(시각적 맥락)** 을 통해 연결하는 것이 목표다.
@@ -29,6 +33,22 @@
 
 이 세 가지를 결합해, 모델이 단순 언어 모형이 아닌  
 **“의미 기반의 통합 지능(Grounded Intelligence)”** 으로 작동하도록 실험한다.
+
+---
+
+## System Diagram
+
+```
+Vision Encoder → Caption Normalizer → Graph Upsert → Graph Context Pack
+      ↓                                             ↓
+   Vision Mode ───────────────┐          Graph bundle + Findings
+                              ├─> LLMS (V / VL / VGL) → Consensus Core → Debug Payload
+   Vision+Language Mode ──────┘
+```
+
+- `/pipeline/analyze` 는 위 단계를 순차적으로 호출하는 단일 진입점이다.
+- Graph Context Pack 은 Neo4j 에서 summary/facts/paths 를 생성해 VGL 모드를 지원한다.
+- Consensus Core 는 V/VL/VGL 결과를 집계해 agreement score 를 산출한다.
 
 ---
 
@@ -203,4 +223,14 @@ curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
         "max_chars": 120
       }' \
   | jq '{slots: .debug.context_slot_limits, paths: .graph_context.paths}'
-```
+
+---
+
+## Spec References
+
+- [docs/refactor/architecture.md](docs/refactor/architecture.md) – 파이프라인 계층과 책임 정의
+- [docs/refactor/module_specs.md](docs/refactor/module_specs.md) – 서비스/모듈 계약
+- [docs/refactor/graph_schema.md](docs/refactor/graph_schema.md) – Neo4j 스키마 및 제약
+- [docs/refactor/pipeline_modes.md](docs/refactor/pipeline_modes.md) – V/VL/VGL 모드 및 합의 정책
+- [docs/refactor/testing_strategy.md](docs/refactor/testing_strategy.md) – 테스트/CI 전략
+- [docs/refactor/migration_checklist.md](docs/refactor/migration_checklist.md) – 리팩터 진행 체크리스트
