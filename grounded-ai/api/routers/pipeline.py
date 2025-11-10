@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from itertools import combinations
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 import hashlib
 
@@ -44,6 +44,9 @@ GRAPH_TRIPLE_CHAR_CAP = 1800
 CONSENSUS_AGREEMENT_THRESHOLD = 0.6
 CONSENSUS_HIGH_CONFIDENCE_THRESHOLD = 0.8
 CONSENSUS_MODE_PRIORITY = ("VGL", "VL", "V")
+TEXT_SIMILARITY_WEIGHT = 0.6
+STRUCTURED_OVERLAP_WEIGHT = 0.3
+GRAPH_EVIDENCE_WEIGHT = 0.10
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -129,6 +132,138 @@ def _preferred_mode(modes: List[str]) -> Optional[str]:
     return modes[0] if modes else None
 
 
+def _normalise_term(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        candidate = str(value)
+    else:
+        candidate = str(value).strip()
+    cleaned = re.sub(r"\s+", " ", candidate).strip().lower()
+    return cleaned or None
+
+
+def _expand_term(term: str) -> Set[str]:
+    variants: Set[str] = {term}
+    if " " in term:
+        for token in term.split():
+            token_clean = token.strip()
+            if len(token_clean) >= 4:
+                variants.add(token_clean)
+    return variants
+
+
+def _collect_finding_terms(findings: Optional[List[Dict[str, Any]]]) -> Tuple[Set[str], Set[str]]:
+    type_terms: Set[str] = set()
+    location_terms: Set[str] = set()
+    if not findings:
+        return type_terms, location_terms
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        type_term = _normalise_term(finding.get("type"))
+        if type_term:
+            type_terms.update(_expand_term(type_term))
+        location_term = _normalise_term(finding.get("location"))
+        if location_term:
+            location_terms.update(_expand_term(location_term))
+    return type_terms, location_terms
+
+
+def _term_overlap_score(text_lower: str, terms: Set[str]) -> float:
+    if not text_lower or not terms:
+        return 0.0
+    hits = 0
+    total = 0
+    for term in terms:
+        if not term:
+            continue
+        total += 1
+        if term in text_lower:
+            hits += 1
+    if total == 0:
+        return 0.0
+    return min(1.0, hits / total)
+
+
+def _structured_overlap_score(text: str, type_terms: Set[str], location_terms: Set[str]) -> float:
+    if not text:
+        return 0.0
+    lowered = text.lower()
+    type_score = _term_overlap_score(lowered, type_terms)
+    location_score = _term_overlap_score(lowered, location_terms)
+    weighted = (type_score * 0.6) + (location_score * 0.4)
+    return min(1.0, weighted)
+
+
+def _graph_paths_strength(path_count: int, triple_total: int) -> float:
+    if path_count <= 0 or triple_total <= 0:
+        return 0.0
+    coverage = min(1.0, path_count / 3.0)
+    depth = min(1.0, triple_total / 6.0)
+    return round(min(1.0, (coverage * 0.4) + (depth * 0.6)), 3)
+
+
+def _fallback_paths_from_findings(
+    image_id: Optional[str],
+    findings: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if not findings:
+        return []
+    budget = max(int(limit), 1)
+    token = str(image_id or "").strip() or "UNKNOWN"
+    fallback_paths: List[Dict[str, Any]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        fid = str(
+            finding.get("id")
+            or finding.get("finding_id")
+            or finding.get("uid")
+            or f"FALLBACK_{len(fallback_paths) + 1}"
+        )
+        label = str(finding.get("type") or finding.get("label") or f"Finding[{fid}]")
+        location = str(finding.get("location") or "").strip()
+        triples = [f"Image[{token}] -HAS_FINDING-> Finding[{fid}]"]
+        if location:
+            triples.append(f"Finding[{fid}] -LOCATED_IN-> Anatomy[{location}]")
+        score_raw = finding.get("conf")
+        try:
+            score = float(score_raw) if score_raw is not None else 0.5
+        except (TypeError, ValueError):
+            score = 0.5
+        fallback_paths.append({
+            "slot": "findings",
+            "label": label,
+            "triples": triples,
+            "score": score,
+        })
+        if len(fallback_paths) >= budget:
+            break
+    return fallback_paths
+
+
+def _ensure_findings_slot_allocation(bundle: Dict[str, Any], minimum: int) -> None:
+    if minimum <= 0:
+        return
+    slot_limits = bundle.get("slot_limits")
+    if not isinstance(slot_limits, dict):
+        slot_limits = {"findings": minimum, "reports": 0, "similarity": 0}
+        bundle["slot_limits"] = slot_limits
+    else:
+        slot_limits["findings"] = max(int(slot_limits.get("findings", 0)), minimum)
+    slot_meta = bundle.get("slot_meta")
+    try:
+        allocated_total = sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity"))
+    except Exception:
+        allocated_total = minimum
+    if isinstance(slot_meta, dict):
+        slot_meta["allocated_total"] = max(int(slot_meta.get("allocated_total", 0)), allocated_total)
+    else:
+        bundle["slot_meta"] = {"allocated_total": allocated_total, "slot_source": "auto"}
+
+
 def compute_consensus(
     results: Dict[str, Dict[str, Any]],
     modality: Optional[str] = None,
@@ -137,12 +272,16 @@ def compute_consensus(
     *,
     anchor_mode: Optional[str] = None,
     anchor_min_score: float = 0.75,
+    structured_findings: Optional[List[Dict[str, Any]]] = None,
+    graph_paths_strength: float = 0.0,
 ) -> Dict[str, Any]:
     available: Dict[str, Dict[str, Any]] = {}
     weight_map = {k: float(v) for k, v in (weights or {}).items()}
     fallback_threshold = min_agree if min_agree is not None else CONSENSUS_AGREEMENT_THRESHOLD
     modality_key = (modality or "").upper()
     penalised_modes: set[str] = set()
+    type_terms, location_terms = _collect_finding_terms(structured_findings)
+    graph_signal = max(0.0, min(1.0, float(graph_paths_strength or 0.0)))
     for mode, payload in results.items():
         if not isinstance(payload, dict):
             continue
@@ -165,6 +304,7 @@ def compute_consensus(
                 "penalty_terms": offending_terms,
                 "effective_weight": effective_weight,
                 "base_weight": base_weight,
+                "structured_overlap": _structured_overlap_score(text, type_terms, location_terms),
             }
 
     total_modes = len(available)
@@ -195,6 +335,7 @@ def compute_consensus(
     best_weighted_score = -1.0
     best_raw_score = 0.0
     best_pair_penalty_modes: tuple[str, ...] = ()
+    best_pair_graph_bonus = False
     for (mode_a, data_a), (mode_b, data_b) in combinations(available.items(), 2):
         score = _jaccard_similarity(data_a["normalised"], data_b["normalised"])
         weight_a = data_a.get("effective_weight", weight_map.get(mode_a, 1.0))
@@ -203,7 +344,15 @@ def compute_consensus(
         penalty_adjustment = (
             min(data_a.get("penalty", 0.0), 0.0) + min(data_b.get("penalty", 0.0), 0.0)
         ) / 2.0
-        adjusted_score = max(score + penalty_adjustment, 0.0)
+        structure_bonus = (
+            data_a.get("structured_overlap", 0.0) + data_b.get("structured_overlap", 0.0)
+        ) / 2.0
+        pair_has_vgl = "VGL" in (mode_a, mode_b)
+        graph_bonus = GRAPH_EVIDENCE_WEIGHT * graph_signal if pair_has_vgl else 0.0
+        text_component = score * TEXT_SIMILARITY_WEIGHT
+        structure_component = structure_bonus * STRUCTURED_OVERLAP_WEIGHT
+        raw_score = text_component + structure_component + graph_bonus
+        adjusted_score = min(max(raw_score + penalty_adjustment, 0.0), 1.0)
         weighted_score = adjusted_score * pair_weight
         if weighted_score > best_weighted_score:
             best_weighted_score = weighted_score
@@ -213,6 +362,7 @@ def compute_consensus(
             best_pair_penalty_modes = tuple(
                 sorted({candidate for candidate in (mode_a, mode_b) if available[candidate]["penalty"] < 0})
             )
+            best_pair_graph_bonus = graph_bonus > 0
 
     agreement_score = max(best_raw_score, 0.0)
     supporting_modes: List[str] = []
@@ -256,8 +406,6 @@ def compute_consensus(
     elif best_pair_penalty_modes:
         penalty_note = "modality conflict: " + ", ".join(best_pair_penalty_modes)
 
-    disagreed_modes = sorted(set(available.keys()) - set(supporting_modes))
-
     notes: Optional[str] = None
     if supporting_modes:
         preferred = _preferred_mode(supporting_modes) or supporting_modes[0]
@@ -289,6 +437,7 @@ def compute_consensus(
             penalty_note = f"{penalty_note} | {penalty_detail}" if penalty_note else penalty_detail
             confidence = "very_low"
 
+    disagreed_modes = sorted(set(available.keys()) - set(supporting_modes))
     degraded_inputs = sorted(mode for mode, data in available.items() if data.get("degraded"))
     presented_text = consensus_text if status != "disagree" else f"낮은 확신: {consensus_text}"
 
@@ -309,6 +458,14 @@ def compute_consensus(
         all_notes.append(notes)
     if penalty_note:
         all_notes.append(penalty_note)
+    if status != "disagree":
+        structured_alignment = any(
+            available.get(mode, {}).get("structured_overlap", 0.0) >= 0.5 for mode in supporting_modes
+        )
+        if structured_alignment:
+            all_notes.append("structured finding terms aligned across agreeing modes")
+        if graph_signal > 0 and ("VGL" in supporting_modes or best_pair_graph_bonus):
+            all_notes.append(f"graph evidence boosted consensus (paths_signal={graph_signal:.2f})")
     if penalised_modes and status != "disagree" and not penalty_note:
         all_notes.append("penalty applied for modality conflict")
     if all_notes:
@@ -452,7 +609,8 @@ def _read_image_bytes(payload: AnalyzeReq) -> tuple[bytes, Optional[str]]:
 
 
 async def _ensure_dependencies(request: Request) -> None:
-    async with httpx.AsyncClient(app=request.app, base_url="http://internal") as client:
+    transport = httpx.ASGITransport(app=request.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://internal") as client:
         for path, label in [
             ("/health/llm", "llm"),
             ("/health/vlm", "vlm"),
@@ -983,6 +1141,23 @@ async def analyze(
         else:
             paths_list = []
 
+        if not paths_list and findings_list:
+            slot_limits = context_bundle.get("slot_limits") if isinstance(context_bundle, dict) else None
+            fallback_budget = 0
+            if isinstance(slot_limits, dict):
+                try:
+                    fallback_budget = max(int(slot_limits.get("findings", 0)), 0)
+                except (TypeError, ValueError):
+                    fallback_budget = 0
+            if fallback_budget == 0:
+                fallback_budget = min(len(findings_list), 2)
+            fallback_paths = _fallback_paths_from_findings(image_id, findings_list, fallback_budget)
+            if fallback_paths:
+                paths_list = fallback_paths
+                if isinstance(context_bundle, dict):
+                    context_bundle["paths"] = paths_list
+                    _ensure_findings_slot_allocation(context_bundle, len(paths_list))
+
         if not findings_list and not paths_list and len(finding_ids) == 0:
             no_graph_evidence = True
         elif graph_degraded and not findings_list and normalized_findings:
@@ -995,6 +1170,7 @@ async def analyze(
 
         ctx_paths_total = sum(len(path.get("triples") or []) for path in paths_list)
         has_paths = len(paths_list) > 0
+        graph_paths_strength = _graph_paths_strength(len(paths_list), ctx_paths_total)
 
         if isinstance(context_bundle, dict):
             context_bundle.setdefault("finding_source", finding_source)
@@ -1011,6 +1187,7 @@ async def analyze(
                 "context_paths_len": len(paths_list),
                 "context_paths_head": paths_list[:2],
                 "context_paths_triple_total": ctx_paths_total,
+                "graph_paths_strength": graph_paths_strength,
                 "context_slot_limits": context_bundle.get("slot_limits"),
                 "similar_seed_images": similar_seed_images,
                 "similarity_edges_created": similarity_edges_created,
@@ -1154,6 +1331,8 @@ async def analyze(
             min_agree=0.35,
             anchor_mode="VGL" if has_paths else None,
             anchor_min_score=0.75,
+            structured_findings=findings_list,
+            graph_paths_strength=graph_paths_strength,
         )
         results["consensus"] = consensus
         debug_blob["consensus"] = consensus

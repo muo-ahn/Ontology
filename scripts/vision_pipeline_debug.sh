@@ -15,6 +15,17 @@ fi
 FILE_PATH="$1"
 PARAMETERS="$2"
 
+# Validate parameter JSON (must be an object; "{}" allowed)
+if ! echo "$PARAMETERS" | jq -e 'type == "object"' >/dev/null 2>&1; then
+  echo "parameters_json must be a valid JSON object" >&2
+  exit 1
+fi
+
+HAS_CUSTOM_PARAMS=false
+if echo "$PARAMETERS" | jq -e 'keys | length > 0' >/dev/null 2>&1; then
+  HAS_CUSTOM_PARAMS=true
+fi
+
 build_body() {
   local include_params="$1"
   if [ "$include_params" = "with_params" ]; then
@@ -40,22 +51,31 @@ build_body() {
   fi
 }
 
+PRIMARY_MODE="without_params"
+if [ "$HAS_CUSTOM_PARAMS" = true ]; then
+  PRIMARY_MODE="with_params"
+fi
+
 echo "=== [8] Vision Pipeline Debug Query ==="
 curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
   -H 'Content-Type: application/json' \
-  -d "$(build_body without_params)" | jq '.debug'
+  -d "$(build_body "$PRIMARY_MODE")" | jq '.debug'
 
 echo ""
 echo "=== [9] Debug with parameters ==="
-curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
-  -H 'Content-Type: application/json' \
-  -d "$(build_body with_params)" | jq '{finding_fallback: .debug.finding_fallback, finding_source: .results.finding_source, seeded_ids: .results.seeded_finding_ids}'
+if [ "$HAS_CUSTOM_PARAMS" = true ]; then
+  curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
+    -H 'Content-Type: application/json' \
+    -d "$(build_body with_params)" | jq '{finding_fallback: .debug.finding_fallback, finding_source: .results.finding_source, seeded_ids: .results.seeded_finding_ids}'
+else
+  echo '{"info":"no parameters supplied"}'
+fi
 
 echo ""
 echo "=== [10-1] E2E sync test (with parameters) ==="
 curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
   -H 'Content-Type: application/json' \
-  -d "$(build_body with_params)"
+  -d "$(build_body "$PRIMARY_MODE")"
 
 echo ""
 echo "=== [10-2] E2E sync test (no parameters, with jq filter) ==="

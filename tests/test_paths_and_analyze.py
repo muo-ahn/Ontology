@@ -681,6 +681,49 @@ def test_pipeline_builds_fallback_paths_when_graph_returns_none(
     assert "No path generated" not in triples_block
 
 
+def test_pipeline_backfills_paths_when_graph_returns_no_facts(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = LookupResult(
+        image_id="IMG777X",
+        storage_uri="/data/dummy/IMG777X.png",
+        modality="CT",
+        source="alias",
+    )
+    harness = _PipelineHarness(
+        lookup=lookup,
+        paths_by_slot={},
+        summary_rows=[],
+        facts={"image_id": "IMG777X", "findings": []},
+    )
+    harness.install(monkeypatch)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "file_path": "/tmp/IMG777X.png",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 1,
+            "max_chars": 80,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    debug_blob = payload.get("debug", {})
+    assert debug_blob.get("context_paths_len", 0) >= 1
+    graph_context = payload.get("graph_context", {})
+    paths = graph_context.get("paths", [])
+    assert paths, "fallback injection failed to add any evidence path"
+    assert any("HAS_FINDING" in triple for triple in paths[0].get("triples", []))
+    slot_limits = graph_context.get("slot_limits", {})
+    assert isinstance(slot_limits, dict) and slot_limits.get("findings", 0) >= 1
+    facts = graph_context.get("facts", {})
+    assert isinstance(facts.get("findings"), list) and facts["findings"], "facts should reflect fallback findings"
+
+
 def test_pipeline_marks_degraded_when_upsert_returns_no_ids(
     pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:

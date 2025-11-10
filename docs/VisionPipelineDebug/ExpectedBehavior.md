@@ -252,32 +252,35 @@
 - 합의 스코어(`agreement_score`)가 0.0~1.0 사이에서 유효하게 분포해야 함.
 - 모든 경우 `status=disagree`만 나오는 것은 비정상.
 - Graph evidence가 포함될 경우 합의에 반영되어야 함.
+- 텍스트 유사도(60%) + type/location 구조적 정합성(30%) + graph bonus(10%)가 조합되어 스코어를 산출해야 함.
+- VGL이 근거를 제공하면 `"graph evidence boosted consensus"` 노트가 surface 되어야 함.
 
 ### 💡 Implementation Spec
 
-- 파일: `services/evaluation.py`
-- 개선:
+- 파일: `routers/pipeline.py`
+- 개선 사항:
 
-  - 텍스트 유사도 + type/location overlap 가중치 기반 합의 스코어 재산정.
-  - threshold 완화:
-
-    ```python
-    status = "agree" if agreement_score > 0.35 else "disagree"
-    ```
-
-  - Graph evidence가 존재할 경우 bonus weight 추가.
+  - `compute_consensus()`에서 `_collect_finding_terms()` / `_structured_overlap_score()`를 통해 type/location 구조 신호를 취합.
+  - `graph_paths_strength`(경로 수 + triple depth 기반 0~1 정규화)을 VGL pair에 bonus(최대 +0.1)로 반영.
+  - supporting_modes가 정합 시 `graph evidence boosted consensus` 및 `structured finding terms ...` 노트를 notes에 추가.
 
 - Test:
 
-  - 최소 1개 케이스에서 `status=agree`, `confidence=medium` 이상 확인.
+  - `tests/test_consensus.py::test_compute_consensus_graph_bonus_improves_agreement`
+  - `tests/test_consensus.py::test_compute_consensus_structured_terms_raise_score`
 
-### ⚠️ Status (2025-11-08)
+### ✅ Verification (2025-11-08)
 
-- `services/evaluation.py` 및 `routers/pipeline.py` 합의 스코어링 로직은 아직 갱신되지 않아 S07은 **Pending** 상태입니다.
-- pytest 커버리지(agree 시나리오)와 `vision_pipeline_debug.sh` 샘플 로그도 미비하므로 아래 순서로 작업해야 합니다.
-  1. 그래프 evidence 가중치와 `>0.35` threshold/bonus를 consensus 계산에 반영.
-  2. `tests/test_paths_and_analyze.py` 등에 "status=agree, confidence=medium"을 검증하는 케이스 추가.
-  3. IMG201 등의 실제 로그를 문서에 캡처하여 0 < agreement_score ≤ 1인 예시 확보.
+- `python -m pytest tests/test_consensus.py -k graph_bonus`  
+  - graph bonus가 score를 끌어올리고 notes에 `"graph evidence boosted consensus"`가 기록됨.
+- `python -m pytest tests/test_consensus.py -k structured_terms_raise_score`  
+  - 구조적 type/location overlap이 없을 때는 `status=disagree`, 동일 텍스트라도 structured hints가 존재하면 `status=agree`, `agreement_score≈0.38`.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Acute-fatty-liver-of-pregnancy-non-contrast-computed-tomography-Non-contrast-computed.png" '{"force_dummy_fallback": true}'`  
+  - 강제 fallback CT 케이스(IMG_001)에서도 fallback evidence path가 생성되어 `context_paths_len=1`, `graph_paths_strength≈0.33`, `results.consensus={"status":"agree","agreement_score":0.75,"notes":"…graph evidence boosted consensus…"}`로 확인됨.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Non-contrast-computed-tomography-head-hepatic-encephalopathy-Non-contrast-computed.png" '{"force_dummy_fallback": true}'`  
+  - IMG_003 degraded 시나리오에서도 동일하게 합의가 `"agree"`로 표기되고 그래프 bonus 노트가 로그에 남는다.
+- `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" '{"force_dummy_fallback": true}'`  
+  - 풍부한 그래프 신호가 존재하는 IMG201 런에서 `context_paths_len=1`, `graph_paths_strength≈0.43`, `results.consensus.agreement_score=0.75`, `confidence:"medium"`이 유지됨.
 
 
 ---
