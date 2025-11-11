@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from routers.pipeline import compute_consensus
+from services.consensus import compute_consensus
 
 
 def _base_results() -> Dict[str, Dict[str, str]]:

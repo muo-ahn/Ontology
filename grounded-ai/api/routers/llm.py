@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from services.dummy_dataset import lookup_entry
 from services.llm_runner import LLMRunner
+from services.consensus import modality_penalty
 
 
 class AnswerMode(str, Enum):
@@ -71,23 +72,6 @@ VGL_TEMPLATE = """[GRAPH CONTEXT]
 [질문]
 이 영상을 한국어 한 줄로 요약하라.
 """
-
-BANNED_BY_MODALITY: Dict[str, list[str]] = {
-    "US": ["gestational", "fetal", "uterus", "ecg"],
-    "CT": ["fetal", "uterus", "ecg"],
-}
-
-
-def modality_penalty(text: str, modality: Optional[str]) -> float:
-    """Return a negative penalty if the text conflicts with the study modality."""
-
-    if not modality:
-        return 0.0
-
-    t = (text or "").lower()
-    bad = BANNED_BY_MODALITY.get(modality.upper(), [])
-    return -0.2 if any(term in t for term in bad) else 0.0
-
 
 def get_llm(request: Request) -> LLMRunner:
     runner: LLMRunner | None = getattr(request.app.state, "llm", None)
