@@ -845,7 +845,7 @@ async def analyze(
                 "pipeline.fallback.findings",
                 extra={
                     "case_id": case_id,
-                    "image_id": normalized_image_id,
+                    "image_id": image_id,
                     "strategy": finding_source or fallback_strategy or "unknown",
                     "registry_hit": fallback_registry_hit,
                     "seeded_ids": seeded_finding_ids[:3],
@@ -1357,4 +1357,3 @@ async def analyze(
             context_builder.close()
         if graph_repo is not None:
             graph_repo.close()
-

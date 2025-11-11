@@ -322,7 +322,16 @@
 
 ### Status
 
-- **미해결 (Fix TODO)** — 서비스 가드/테스트 추가 필요.
+- **해결 (2025-01-14)** — `services/image_identity.identify_image()` 는 slug fallback + 502 가드 적용 완료, `routers/pipeline.py` 의 fallback 로그에서도 존재하지 않는 `normalized_image_id` 대신 `image_id` 를 사용하도록 수정해 NameError 경로 제거.
+
+### Verification (2025-01-14)
+
+```bash
+pytest tests/test_image_identity.py
+./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Ultrasound-fatty-liver-Ultrasound-of-the-whole-abdomen-showing-increased-hepatic.png" '{"force_dummy_fallback": true}'
+```
+
+- IMG201 케이스가 `case_id:"CASE_IMG201"` / `image_id:"IMG201"` 로 성공하고, fallback/seeded 컨텍스트 및 consensus 노트가 정상 표기됨을 확인.
 
 ---
 
@@ -341,16 +350,7 @@
 
 ## 6. Next Steps
 
-1. **각 Spec(S01–S07)**을 독립적인 테스트 케이스 단위로 분리.
-2. 각 항목에 대한 `spec_*.md` 세부 설계 작성:
-
-   - Expected
-   - Failure Condition
-   - Test Curl
-   - Regression Criteria
-
-3. 이후 `vision_pipeline_debug.sh` 자동 회귀 테스트 루틴 추가:
-
-   ```bash
-   ./scripts/test_pipeline_integrity.sh --case IMG201 --expect slots,paths,consensus
-   ```
+1. **Spec 마이크로 테스트화:** S01~S08 각각을 독립 pytest/golden 케이스로 분리해 회귀 시 즉시 감지.
+2. **spec_*.md 확장:** Expected / Failure / Repro Curl / Regression Criteria 템플릿을 문서화하고 TicketPlan 에 링크.
+3. **자동 회귀 루틴:** `vision_pipeline_debug.sh` 호출을 모아둔 `scripts/test_pipeline_integrity.sh --case IMG201 --expect slots,paths,consensus` 스크립트화.
+4. **CI 연동:** GitHub Actions 에서 slug fallback/IdentityError 테스트, graph-path guard, consensus snapshot 등을 nighty + PR 단계에서 실행.

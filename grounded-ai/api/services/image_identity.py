@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Protocol, Tuple
@@ -83,7 +84,9 @@ def identify_image(
             raise ImageIdentityError("image_id must not be blank", status_code=422) from exc
         image_id_source = "payload"
     else:
-        derived_image_id, lookup_candidate = _derive_image_id_from_path(resolved_path)
+        derived_image_id, lookup_candidate = _derive_image_id_from_path(
+            resolved_path or payload.file_path or image_path or working_image.get("path"),
+        )
         if derived_image_id:
             normalized_image_id = derived_image_id
             if lookup_candidate:
@@ -162,10 +165,37 @@ def _derive_image_id_from_path(path: Optional[str]) -> Tuple[Optional[str], Opti
         return lookup.image_id, lookup
 
     stem = Path(path).stem
-    alnum = re.sub(r"[^A-Za-z0-9]+", "", stem)
-    if not alnum:
-        return None, None
-    return alnum.upper()[:48], None
+    candidate = _extract_existing_identifier(stem)
+    if candidate:
+        return candidate, None
+
+    slug_candidate = _build_slug_identifier(stem or path)
+    if slug_candidate:
+        return slug_candidate, None
+
+    return None, None
+
+
+def _extract_existing_identifier(stem: Optional[str]) -> Optional[str]:
+    if not stem:
+        return None
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "", stem).upper()
+    if not cleaned:
+        return None
+    if cleaned.startswith("IMG"):
+        return DummyImageRegistry.normalise_id(cleaned)
+    return None
+
+
+def _build_slug_identifier(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    slug = _slugify(value).upper()
+    if not slug:
+        return None
+    slug = slug[:24]
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:6].upper()
+    return f"IMG_{slug}_{digest}"
 
 
 def _resolve_seed_storage_uri(

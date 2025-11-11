@@ -8,7 +8,7 @@
 
 | 레벨 | 파일 | 목적 | 요구 사항 |
 | --- | --- | --- | --- |
-| Unit | `tests/test_image_identity.py` | 파일명 파싱, seed hit, fallback 검증 | 파라미터화된 입력/출력 |
+| Unit | `tests/test_image_identity.py` | 파일명 파싱, seed hit, slug fallback, 502 예외 가드(S08) | 파라미터화된 입력/출력 |
 | Unit | `tests/test_context_orchestrator.py` | slot rebalance, dedup | Neo4j mock |
 | Unit | `tests/test_consensus.py` | 가중치, 불일치 경고 | fixtures/ModeResult |
 | Snapshot | `tests/test_consensus_snapshot.py` | IMG201 케이스 agreement score 잠금 | JSON 골든 파일 |
@@ -40,6 +40,7 @@
 
 - 합의 점수가 0.1 이상 변하면 테스트 실패.
 - `GraphBundle.paths` 길이가 0이면 `test_context_orchestrator` 경고를 발생시켜 Issue E 회귀 방지.
+- `identify_image()` 가 registry miss 시에도 slug fallback 으로 `IMG_<SLUG>_<CRC>` 를 생성하며, 최종 ID 가 없으면 반드시 `ImageIdentityError(code="unresolved_image_id")` 를 발생시키는지 확인 (Spec S08).
 - `ImageIdentity.seed_hit` 비율이 0.8 미만이면 실패(시드 데이터가 깨졌는지 확인).
 
 ---

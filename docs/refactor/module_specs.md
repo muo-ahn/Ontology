@@ -13,7 +13,10 @@ I/O 추상화를 통해 추후 async 전환을 지원한다.
 | Output Model | `ImageIdentity(id: str, storage_uri: str, seed_hit: bool, registry_source: Optional[str])` |
 | Steps | (1) 파일명 슬러그화 → IMG### 추출 → (2) `seed_registry.json` 조회 → (3) 스토리지 경로 생성 → (4) fallback 해시 |
 | Validation | `id` 는 `[A-Z0-9_]+`, `storage_uri` 는 `s3://` 또는 `gs://` prefix |
-| Errors | 잘못된 파일명: `ImageIdentityError(code="invalid_filename")` |
+| Fallback | Normalizer/registry miss 시 `IMG_<SLUG>_<CRC>` 규칙으로 deterministic slug 재구성 (Graph Schema Issue A 제약을 준수) |
+| Errors | 잘못된 파일명: `ImageIdentityError(code="invalid_filename")`; slug 생성 실패 또는 최종 `image_id` 미생성 시 `ImageIdentityError(code="unresolved_image_id", status_code=502)` (Spec S08) |
+
+> **S08 Guardrail:** `identify_image()` 는 내부적으로 `normalized_image_id` 변수를 초기화한 뒤 모든 파생 로직에서 이 값을 갱신해야 하며, 마지막까지 비어 있다면 FastAPI 계층에 502 오류를 전달할 수 있도록 예외를 던진다. NameError/stack trace 는 노출되지 않는다.
 
 ---
 

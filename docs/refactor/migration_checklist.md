@@ -27,6 +27,7 @@
 | 상태 | 작업 | 완료 조건 | 검증 |
 | --- | --- | --- | --- |
 | TODO | `image_identity.py` 생성 | 서비스/테스트/DI wiring 완료 | `pytest tests/test_image_identity.py` |
+| TODO | S08 Image Identity 가드레일 | registry miss 시 slug fallback (`IMG_<SLUG>_<CRC>`) 생성 및 ID 미생성 시 502 `ImageIdentityError` 발생 | `pytest tests/test_image_identity.py -k slug_fallback` |
 | TODO | `context_orchestrator.py` 생성 | GraphBundle Typed 반환 | `pytest tests/test_context_orchestrator.py` |
 | TODO | `consensus.py` + 모드 합의 | 가중치/투표 로직 구현, snapshot test 추가 | `pytest tests/test_consensus_snapshot.py` |
 | TODO | `debug_payload.py` | 디버그 JSON 스키마 문서화 | Response schema diff |
