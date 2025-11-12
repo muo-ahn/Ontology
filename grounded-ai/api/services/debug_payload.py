@@ -67,14 +67,23 @@ class DebugPayloadBuilder:
         self._payload["pre_upsert_findings_head"] = pre_upsert_findings[:2]
         self._payload["pre_upsert_report_conf"] = report_confidence
 
-    def record_upsert(self, receipt: Dict[str, Any], finding_ids: Iterable[str]) -> None:
+    def record_upsert(
+        self,
+        receipt: Dict[str, Any],
+        finding_ids: Iterable[str],
+        *,
+        verified_ids: Optional[Iterable[str]] = None,
+    ) -> None:
         if not self.enabled:
             return
-        self._payload.update({
+        payload = {
             "stage": "post_upsert",
             "upsert_receipt": dict(receipt),
             "post_upsert_finding_ids": list(finding_ids),
-        })
+        }
+        if verified_ids is not None:
+            payload["post_upsert_verified_ids"] = list(verified_ids)
+        self._payload.update(payload)
 
     def record_context(
         self,

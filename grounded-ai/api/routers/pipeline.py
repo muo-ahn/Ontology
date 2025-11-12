@@ -24,6 +24,8 @@ from services.context_orchestrator import ContextLimits, ContextOrchestrator
 from services.debug_payload import DebugPayloadBuilder
 from services.dummy_registry import DummyFindingRegistry
 from services.dedup import dedup_findings
+from services.finding_validation import FindingValidationError, validate_findings_payload
+from services.finding_verifier import FindingVerifier
 from services.graph_repo import GraphRepo
 from services.image_identity import ImageIdentityError, identify_image
 from services.llm_runner import LLMRunner
@@ -221,6 +223,7 @@ async def analyze(
     overall_notes: Optional[str] = None
     graph_degraded = False
     graph_repo: Optional[GraphRepo] = None
+    finding_verifier: Optional[FindingVerifier] = None
     context_builder: Optional[GraphContextBuilder] = None
     debug_builder = DebugPayloadBuilder(enabled=debug_enabled)
     param_overrides: Dict[str, Any] = dict(payload.parameters or {})
@@ -268,6 +271,22 @@ async def analyze(
         if le is not None and value > le:
             raise HTTPException(status_code=422, detail=f"{key} must be ≤ {le}")
         return value
+
+    def _validate_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        try:
+            return validate_findings_payload(findings)
+        except FindingValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+    def _raise_upsert_mismatch(expected_ids: List[str], receipt_ids: List[str], verified_ids: List[str]) -> None:
+        detail_errors = [{
+            "stage": "upsert",
+            "msg": "finding_upsert_mismatch",
+            "expected_ids": sorted(set(expected_ids)),
+            "receipt_ids": sorted(set(receipt_ids)),
+            "verified_ids": sorted(set(verified_ids)),
+        }]
+        raise HTTPException(status_code=500, detail={"ok": False, "errors": detail_errors})
 
     def _resolve_confidence_level(score: float, path_triples: int) -> str:
         if score >= 0.7 and path_triples >= 3:
@@ -384,6 +403,7 @@ async def analyze(
 
         # Normalize + dedup findings (keep list[dict] invariant)
         normalized_findings = dedup_findings(list(normalized.get("findings") or []))
+        normalized_findings = _validate_findings(normalized_findings)
 
         seeded_finding_ids: List[str] = []
         seeded_records: List[Dict[str, Any]] = []
@@ -415,6 +435,7 @@ async def analyze(
         seeded_applied = False
         if (force_dummy_fallback or not normalized_findings) and seeded_records:
             normalized_findings = dedup_findings(seeded_records)
+            normalized_findings = _validate_findings(normalized_findings)
             seeded_applied = True
             fallback_used = True
             fallback_registry_hit = True
@@ -499,6 +520,7 @@ async def analyze(
         )
 
         graph_repo = GraphRepo.from_env()
+        finding_verifier = FindingVerifier(graph_repo)
         context_builder = GraphContextBuilder(graph_repo)
         context_orchestrator = ContextOrchestrator(context_builder)
 
@@ -535,22 +557,26 @@ async def analyze(
             image_id = resolved_image_id
             normalized_image["image_id"] = resolved_image_id
             normalized["image"]["image_id"] = resolved_image_id
-        finding_ids = list(upsert_receipt.get("finding_ids") or [])
+        finding_ids = [fid for fid in list(upsert_receipt.get("finding_ids") or []) if isinstance(fid, str)]
+        expected_finding_ids = [str(finding.get("id")) for finding in normalized_findings if isinstance(finding.get("id"), str)]
+        verified_finding_ids: List[str] = []
 
-        debug_builder.record_upsert(upsert_receipt, finding_ids)
+        if expected_finding_ids:
+            try:
+                if finding_verifier is None:
+                    raise RuntimeError("finding verifier unavailable")
+                verification = finding_verifier.verify(image_id, expected_finding_ids)
+                verified_finding_ids = list(verification.actual)
+            except Exception as exc:
+                errors.append({"stage": "upsert_verify", "msg": str(exc)})
+                raise HTTPException(status_code=500, detail={"ok": False, "errors": errors}) from exc
 
-        persisted_f_cnt = 0
-        try:
-            persisted_f_cnt = len(upsert_receipt.get("finding_ids") or [])
-        except Exception:
-            pass
-        upsert_missing_ids = len(normalized_findings) > 0 and persisted_f_cnt == 0
-        if upsert_missing_ids and debug:
-            errors.append({"stage": "upsert", "msg": "normalized findings present but upsert returned no finding_ids"})
-        if upsert_missing_ids:
-            graph_degraded = True
-            overall_status = "degraded"
-            overall_notes = "graph upsert failed, fallback used"
+            receipt_set = set(finding_ids)
+            verified_set = set(verified_finding_ids)
+            if not receipt_set or not verification.matches or receipt_set != verified_set:
+                _raise_upsert_mismatch(expected_finding_ids, finding_ids, verified_finding_ids)
+
+        debug_builder.record_upsert(upsert_receipt, finding_ids, verified_ids=verified_finding_ids or finding_ids)
 
         if graph_repo is not None:
             current_stage = "similarity"

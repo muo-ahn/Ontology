@@ -99,6 +99,16 @@ RETURN
   [x IN finding_ids_raw WHERE x IS NOT NULL] AS finding_ids;
 """
 
+FINDING_IDS_QUERY = """
+UNWIND coalesce($expected_ids, [NULL]) AS expected_id
+WITH expected_id
+MATCH (i:Image {image_id:$image_id})
+OPTIONAL MATCH (i)-[:HAS_FINDING]->(f:Finding)
+WHERE expected_id IS NULL OR f.id = expected_id
+WITH collect(DISTINCT CASE WHEN f IS NULL THEN NULL ELSE f.id END) AS hits
+RETURN [fid IN hits WHERE fid IS NOT NULL] AS finding_ids
+"""
+
 BUNDLE_QUERY = """
 MATCH (i:Image {image_id:$image_id})
 CALL {
@@ -471,15 +481,15 @@ class GraphRepo:
         return data
 
     def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        image_payload = dict(payload.get("image") or {})
-        params = {
-            "image": image_payload,
-            "report": payload.get("report"),
-            "findings": payload.get("findings") or [],
+        params = self._prepare_upsert_parameters(payload)
+        neo4j_params = {
+            "image": dict(params.get("image") or {}),
+            "report": params.get("report"),
+            "findings": params.get("findings") or [],
         }
 
         def _tx_fn(tx):
-            image = params["image"]
+            image = neo4j_params["image"]
             image_id = image.get("image_id")
             if not image_id:
                 raise ValueError("image.image_id is required")
@@ -490,9 +500,9 @@ class GraphRepo:
             path_value = image.get("path")
             if path_value is not None and not isinstance(path_value, str):
                 image["path"] = str(path_value)
-            rec = tx.run(UPSERT_CASE_QUERY, params).single()
+            rec = tx.run(UPSERT_CASE_QUERY, neo4j_params).single()
             if rec is None:
-                return {"image_id": params["image"]["image_id"], "finding_ids": []}
+                return {"image_id": neo4j_params["image"]["image_id"], "finding_ids": []}
             return {
                 "image_id": rec.get("image_id"),
                 "finding_ids": rec.get("finding_ids") or []
@@ -553,6 +563,17 @@ class GraphRepo:
         if not records:
             return []
         return list(records[0]["paths"] or [])
+
+    def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+        """Return finding IDs currently attached to the image."""
+
+        records = self._run_read(FINDING_IDS_QUERY, {"image_id": image_id, "expected_ids": expected_ids})
+        if not records:
+            return []
+        ids = records[0].get("finding_ids") if isinstance(records[0], dict) else None
+        if not ids:
+            return []
+        return [fid for fid in ids if isinstance(fid, str)]
 
     def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
         records = self._run_read(SIMILARITY_CANDIDATES_QUERY, {"image_id": image_id})
