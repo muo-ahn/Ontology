@@ -78,6 +78,24 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 
 ---
 
+
+
+### 현재 시스템 메모
+
+* `/grounded-ai/api/routers/pipeline.py`는 `graph_repo.upsert_case()` 직후 `FindingVerifier`로 재조회 및 비교를 수행하며 불일치 시 `_raise_upsert_mismatch`로 500을 던져 Spec 검증 흐름을 일부 만족함.
+* `normalized_findings`의 `source` 필드는 `FindingSchema (extra="forbid")`가 차단하므로 `_validate_findings`에서 fallback `source`/`model` 키를 제거하거나 Schema를 `extra="ignore"`로 조정해 검증을 통과해야 함.
+* `graph_repo._prepare_upsert_parameters()`와 `upsert_case()`는 현재 Neo4j 파라미터 및 `rec`만 반환하므로 Spec이 제안한 Cypher `fid` vs `fd` 로그와 파라미터를 `DebugPayload` 또는 별도 로깅으로 남겨 `finding_upsert_mismatch` 재현 가능성을 확보해야 함.
+* `DebugPayloadBuilder.record_upsert()`는 `upsert_receipt`과 ID 리스트만 기록하므로 `graph_payload["findings"]`와 `_prepare_upsert_parameters()` 결과를 함께 기록해 `pre_upsert_findings_len > 0`인데 `finding_ids=[]`인 상황을 추적하는 것이 실용적.
+* `scripts/vision_pipeline_debug.sh`에서 수행하던 `force_dummy_fallback=true` 테스트는 `tests/test_upsert_consistency.py` 같은 pytest 통합 테스트로 전환하여 CI에서 `pre_upsert_findings_len > 0` 조건에서도 `finding_ids`가 비어있지 않음을 자동으로 검증하도록 해야 함.
+
+### Spec-01 액션 플랜
+
+1. **검증 레이어 정비** – `_validate_findings`가 `FindingSchema`에 전달하기 전 `normalized_findings`에서 `source`/`model` 같은 보조 메타를 제거하거나 `FindingSchema`의 `extra` 설정을 조정하고, 검증 이후 디버깅용 메타를 다시 주입할 수 있는 구조를 마련 (`grounded-ai/api/routers/pipeline.py`, `grounded-ai/api/services/finding_validation.py`).
+2. **Neo4j 업서트 로깅 확대** – `graph_repo._prepare_upsert_parameters()`와 `upsert_case()`의 입력/출력 (graph_payload, params, fid vs fd) 내용을 `DebugPayloadBuilder` 또는 별도 로깅에 남겨 `finding_upsert_mismatch` 발생 시 데이터를 재생산할 수 있도록 (`grounded-ai/api/services/graph_repo.py`, `grounded-ai/api/services/debug_payload.py`).
+3. **명시적 실패 처리 정비** – `_raise_upsert_mismatch` 호출 시 `errors` 리스트에 `stage: upsert` 항목을 쌓고 즉시 500을 반환하여 degraded fallback이 아닌 실패로 흐르게 만들기 (`grounded-ai/api/routers/pipeline.py`).
+4. **pytest 통합 흐름** – `scripts/vision_pipeline_debug.sh`의 `force_dummy_fallback` 케이스를 `tests/test_upsert_consistency.py`로 이전하고 CI 워크플로우에서 항상 실행하여 `pre_upsert_findings_len > 0`인 경우 `finding_ids`가 비어있지 않아야 함을 검증 (`tests/test_upsert_consistency.py`, `.github/workflows/ci.yml` 등).
+5. **성과 지표 확보** – `timings["upsert_ms"]`나 debug 로그를 활용해 latency `<200ms` 기준을 유지하고, `upsert_success_rate`/`verify_match_rate` 지표를 수집해 문서(예: `docs/stabilization/spec.md` 메트릭 섹션)에도 반영 (`grounded-ai/api/routers/pipeline.py`, `docs/stabilization/spec.md` metrics).
+
 ## ✅ [Spec-02] 폴백 상태 덮어쓰기 방지 (Fallback State Integrity)
 
 ### 🔹 목적
