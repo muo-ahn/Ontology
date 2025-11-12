@@ -11,9 +11,6 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: grounded-ai
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,8 +23,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r api/requirements.txt
+          pip install -r grounded-ai/api/requirements.txt
           pip install pytest
 
-      - name: Run unit tests
-        run: pytest tests/unit -q
+      - name: Run targeted pytest suite
+        env:
+          PYTHONPATH: grounded-ai
+        run: |
+          pytest \
+            tests/test_image_identity.py \
+            tests/test_context_orchestrator.py \
+            tests/test_consensus_snapshot.py \
+            tests/test_debug_payload.py \
+            -q

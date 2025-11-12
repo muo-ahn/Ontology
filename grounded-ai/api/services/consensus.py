@@ -148,6 +148,7 @@ def compute_consensus(
     graph_signal = max(0.0, min(1.0, float(graph_paths_strength or 0.0)))
 
     available: Dict[str, Dict[str, Any]] = {}
+    mode_weights_raw: Dict[str, float] = {}
     for mode, payload in results.items():
         if not isinstance(payload, dict):
             continue
@@ -172,6 +173,7 @@ def compute_consensus(
                 "base_weight": base_weight,
                 "structured_overlap": _structured_overlap_score(text, type_terms, location_terms),
             }
+            mode_weights_raw[mode] = max(base_weight, 0.0)
 
     total_modes = len(available)
     if total_modes == 0:
@@ -202,6 +204,7 @@ def compute_consensus(
     best_raw_score = 0.0
     best_pair_penalty_modes: tuple[str, ...] = ()
     best_pair_graph_bonus = False
+    best_components = {"text": 0.0, "structured": 0.0, "graph": 0.0, "penalty": 0.0}
     for (mode_a, data_a), (mode_b, data_b) in combinations(available.items(), 2):
         score = _jaccard_similarity(data_a["normalised"], data_b["normalised"])
         weight_a = data_a.get("effective_weight", weight_map.get(mode_a, 1.0))
@@ -229,6 +232,12 @@ def compute_consensus(
                 sorted({candidate for candidate in (mode_a, mode_b) if available[candidate]["penalty"] < 0})
             )
             best_pair_graph_bonus = graph_bonus > 0
+            best_components = {
+                "text": text_component,
+                "structured": structure_component,
+                "graph": graph_bonus,
+                "penalty": penalty_adjustment,
+            }
 
     agreement_score = max(best_raw_score, 0.0)
     supporting_modes: List[str] = []
@@ -333,5 +342,22 @@ def compute_consensus(
         all_notes.append("penalty applied for modality conflict")
     if all_notes:
         consensus_payload["notes"] = " | ".join(all_notes)
+    if mode_weights_raw:
+        total_weight = sum(mode_weights_raw.values())
+        if total_weight > 0:
+            consensus_payload["mode_weights"] = {
+                mode: round(weight / total_weight, 3) for mode, weight in mode_weights_raw.items()
+            }
+    if penalised_modes:
+        consensus_payload["conflict_modes"] = sorted(penalised_modes)
+    if anchor_mode_used:
+        consensus_payload["anchor_mode_used"] = True
+    if best_pair:
+        consensus_payload["agreement_components"] = {
+            "text": round(best_components["text"], 3),
+            "structured": round(best_components["structured"], 3),
+            "graph": round(best_components["graph"], 3),
+            "penalty": round(best_components["penalty"], 3),
+        }
 
     return consensus_payload

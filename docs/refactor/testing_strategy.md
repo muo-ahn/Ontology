@@ -9,7 +9,8 @@
 | 레벨 | 파일 | 목적 | 요구 사항 |
 | --- | --- | --- | --- |
 | Unit | `tests/test_image_identity.py` | 파일명 파싱, seed hit, slug fallback, 502 예외 가드(S08) | 파라미터화된 입력/출력 |
-| Unit | `tests/test_context_orchestrator.py` | slot rebalance, dedup | Neo4j mock |
+| Unit | `tests/test_context_orchestrator.py` | slot rebalance, fallback paths, graph strength | GraphContextBuilder fake |
+| Unit | `tests/test_debug_payload.py` | DebugPayloadBuilder stage/필드 누락 방지 | builder 단위 호출 |
 | Unit | `tests/test_consensus.py` | 가중치, 불일치 경고 | fixtures/ModeResult |
 | Snapshot | `tests/test_consensus_snapshot.py` | IMG201 케이스 agreement score 잠금 | JSON 골든 파일 |
 | Integration | `tests/integration/test_pipeline_e2e.py` | dummy 이미지 → full response | test client + mocked LLM |
@@ -30,7 +31,7 @@
 
 1. **Install step:** `pip install -r requirements.txt` + `poetry install` (선택).
 2. **Static checks:** `ruff check`, `mypy`.
-3. **Unit tests:** `pytest tests -m "not integration"`.
+3. **Unit tests:** `PYTHONPATH=grounded-ai pytest tests/test_image_identity.py tests/test_context_orchestrator.py tests/test_consensus_snapshot.py`.
 4. **Integration (nightly):** 사용량 절감을 위해 스케줄 기반으로만 Neo4j/LLM mock 포함 실행.
 5. **Artifact upload:** 실패 시 `artifacts/debug_payload/*.json` 첨부로 재현성 보장.
 

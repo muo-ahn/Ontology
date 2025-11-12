@@ -42,7 +42,7 @@ I/O 추상화를 통해 추후 async 전환을 지원한다.
 | Weights | 기본 `{V:0.5, VL:0.75, VGL:1.0}` + 그래프 bonus (`+0.1`) when `context.paths` hit |
 | Agreement | `agreement_score = jaccard(text_tokens) * overlap(findings)` |
 | Policies | (a) 2/3 majority → high confidence, (b) 모드간 충돌 시 “Low confidence” prefix |
-| Outputs | `ConsensusResult.text`, `agreement_score`, `mode_weights`, `explanations` |
+| Outputs | `ConsensusResult.text`, `agreement_score`, `mode_weights`, `confidence_label`, `conflict_modes`, `agreement_components` |
 
 ---
 
@@ -50,11 +50,11 @@ I/O 추상화를 통해 추후 async 전환을 지원한다.
 
 | 항목 | 세부 내용 |
 | --- | --- |
-| Public API | `def assemble(debug_inputs: DebugInputs) -> dict` |
-| DebugInputs | image identity, context limits, bundle stats, per-mode diagnostics, trace ids |
-| Required Keys | `context_slot_limits`, `finding_fallback_used`, `registry_hit`, `seeded`, `final_k`, `modes` |
-| Optional Keys | `graph_paths_preview` (상위 2개 path), `errors`, `latency_breakdown` |
-| Usage | Response `debug` 필드 및 experiment artifact JSONL 로 직렬화 |
+| Public API | `class DebugPayloadBuilder:` with `set_stage`, `record_identity`, `record_context`, `record_consensus`, `payload()` |
+| DebugInputs | image identity snapshot, fallback 메타, context bundle stats, per-mode diagnostics, evaluation payload |
+| Required Keys | `context_slot_limits`, `finding_fallback`, `seeded_finding_ids`, `context_paths_len`, `consensus` |
+| Optional Keys | `graph_degraded`, `graph_paths_strength`, `similar_seed_images`, `evaluation` |
+| Usage | Router가 builder 메서드로 이벤트를 기록한 뒤 `payload()`를 응답 `debug` 필드로 사용 |
 
 ---
 

@@ -54,6 +54,19 @@ Vision Encoder → Caption Normalizer → Graph Upsert → Graph Context Pack
 - Graph Context Pack 은 Neo4j 에서 summary/facts/paths 를 생성해 VGL 모드를 지원한다.
 - Consensus Core 는 V/VL/VGL 결과를 집계해 agreement score 를 산출한다.
 
+### Debug Payload Reference
+
+`./scripts/vision_pipeline_debug.sh … '{"force_dummy_fallback": true}'` 로 호출하면 FastAPI 응답의 `debug` 필드에 아래 키가 항상 포함된다.
+
+| Stage | 핵심 필드 | 설명 |
+| --- | --- | --- |
+| `pre_upsert` | `norm_image_id`, `finding_fallback`, `seeded_finding_ids` | 이미지 식별·레지스트리 히트 여부, seed 강제 여부 |
+| `context` | `context_summary`, `context_paths_head`, `graph_paths_strength`, `similar_seed_images` | GraphContextBuilder 결과와 fallback 경로/슬롯 |
+| `consensus` | `mode_weights`, `agreement_components`, `anchor_mode_used`, `conflict_modes` | V/VL/VGL 가중치, 텍스트/구조/그래프 기여도, 모달리티 패널티 |
+| `evaluation` | `finding_source`, `seeded_finding_ids`, `status` | 응답 공개용 요약 및 degraded 여부 |
+
+이 덕분에 “그래프 업서트 실패”, “모달리티 충돌”, “graph bonus 적용” 같은 사건을 한눈에 추적할 수 있다.
+
 ---
 
 ## Dataset

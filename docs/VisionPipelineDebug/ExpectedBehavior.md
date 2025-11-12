@@ -353,4 +353,5 @@ pytest tests/test_image_identity.py
 1. **Spec 마이크로 테스트화:** S01~S08 각각을 독립 pytest/golden 케이스로 분리해 회귀 시 즉시 감지.
 2. **spec_*.md 확장:** Expected / Failure / Repro Curl / Regression Criteria 템플릿을 문서화하고 TicketPlan 에 링크.
 3. **자동 회귀 루틴:** `vision_pipeline_debug.sh` 호출을 모아둔 `scripts/test_pipeline_integrity.sh --case IMG201 --expect slots,paths,consensus` 스크립트화.
-4. **CI 연동:** GitHub Actions 에서 slug fallback/IdentityError 테스트, graph-path guard, consensus snapshot 등을 nighty + PR 단계에서 실행.
+4. **CI 연동:** GitHub Actions 에서 slug fallback/IdentityError 테스트, graph-path guard, consensus snapshot 등을 nightly + PR 단계에서 실행.
+5. **모듈 분리 진행률 공개:** `docs/refactor/migration_checklist.md` 의 Module Extraction 섹션을 기준으로 S08 완료 → `context_orchestrator`/`consensus`/`debug_payload` 진행상황을 문서화하고, 각 항목 완료 시 pytest 증거 링크 첨부.

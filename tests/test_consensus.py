@@ -71,3 +71,20 @@ def test_compute_consensus_structured_terms_raise_score() -> None:
     assert with_struct["agreement_score"] > no_struct["agreement_score"]
     assert with_struct["status"] == "agree"
     assert "structured finding terms" in (with_struct.get("notes") or "").lower()
+    assert "mode_weights" in with_struct
+
+
+def test_consensus_reports_conflict_modes_when_penalised() -> None:
+    results = {
+        "V": {"text": "Ultrasound suggests fetal heartbeat."},
+        "VGL": {"text": "Graph evidence: liver lesion persists adjacent to the portal vein."},
+    }
+    consensus = compute_consensus(
+        results,
+        modality="CT",
+        weights={"V": 1.0, "VGL": 1.4},
+        structured_findings=[{"type": "lesion", "location": "liver"}],
+        graph_paths_strength=0.4,
+    )
+    assert "conflict_modes" in consensus
+    assert "V" in consensus["conflict_modes"]

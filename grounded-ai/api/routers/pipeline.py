@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from models.pipeline import AnalyzeResp
 from services.context_pack import GraphContextBuilder
+from services.context_orchestrator import ContextLimits, ContextOrchestrator
+from services.debug_payload import DebugPayloadBuilder
 from services.dummy_registry import DummyFindingRegistry
 from services.dedup import dedup_findings
 from services.graph_repo import GraphRepo
@@ -101,74 +103,6 @@ def clamp_one_line(text: str, max_chars: int) -> str:
 
     cleaned = " ".join(text.split())
     return cleaned[:max_chars]
-
-
-def _graph_paths_strength(path_count: int, triple_total: int) -> float:
-    if path_count <= 0 or triple_total <= 0:
-        return 0.0
-    coverage = min(1.0, path_count / 3.0)
-    depth = min(1.0, triple_total / 6.0)
-    return round(min(1.0, (coverage * 0.4) + (depth * 0.6)), 3)
-
-
-def _fallback_paths_from_findings(
-    image_id: Optional[str],
-    findings: List[Dict[str, Any]],
-    limit: int,
-) -> List[Dict[str, Any]]:
-    if not findings:
-        return []
-    budget = max(int(limit), 1)
-    token = str(image_id or "").strip() or "UNKNOWN"
-    fallback_paths: List[Dict[str, Any]] = []
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        fid = str(
-            finding.get("id")
-            or finding.get("finding_id")
-            or finding.get("uid")
-            or f"FALLBACK_{len(fallback_paths) + 1}"
-        )
-        label = str(finding.get("type") or finding.get("label") or f"Finding[{fid}]")
-        location = str(finding.get("location") or "").strip()
-        triples = [f"Image[{token}] -HAS_FINDING-> Finding[{fid}]"]
-        if location:
-            triples.append(f"Finding[{fid}] -LOCATED_IN-> Anatomy[{location}]")
-        score_raw = finding.get("conf")
-        try:
-            score = float(score_raw) if score_raw is not None else 0.5
-        except (TypeError, ValueError):
-            score = 0.5
-        fallback_paths.append({
-            "slot": "findings",
-            "label": label,
-            "triples": triples,
-            "score": score,
-        })
-        if len(fallback_paths) >= budget:
-            break
-    return fallback_paths
-
-
-def _ensure_findings_slot_allocation(bundle: Dict[str, Any], minimum: int) -> None:
-    if minimum <= 0:
-        return
-    slot_limits = bundle.get("slot_limits")
-    if not isinstance(slot_limits, dict):
-        slot_limits = {"findings": minimum, "reports": 0, "similarity": 0}
-        bundle["slot_limits"] = slot_limits
-    else:
-        slot_limits["findings"] = max(int(slot_limits.get("findings", 0)), minimum)
-    slot_meta = bundle.get("slot_meta")
-    try:
-        allocated_total = sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity"))
-    except Exception:
-        allocated_total = minimum
-    if isinstance(slot_meta, dict):
-        slot_meta["allocated_total"] = max(int(slot_meta.get("allocated_total", 0)), allocated_total)
-    else:
-        bundle["slot_meta"] = {"allocated_total": allocated_total, "slot_source": "auto"}
 
 
 @contextmanager
@@ -288,7 +222,7 @@ async def analyze(
     graph_degraded = False
     graph_repo: Optional[GraphRepo] = None
     context_builder: Optional[GraphContextBuilder] = None
-    debug_blob: Dict[str, Any] = {"stage": "init"}
+    debug_builder = DebugPayloadBuilder(enabled=debug_enabled)
     param_overrides: Dict[str, Any] = dict(payload.parameters or {})
     force_dummy_fallback = _is_truthy(param_overrides.get("force_dummy_fallback"))
     normalization_cache_seed = _compute_cache_seed(payload) if debug_enabled else None
@@ -376,8 +310,7 @@ async def analyze(
             image_bytes, image_path = _read_image_bytes(payload)
         except HTTPException:
             raise
-        if debug_enabled:
-            debug_blob["stage"] = current_stage
+        debug_builder.set_stage(current_stage)
 
         temp_file: Optional[str] = None
         image_path_for_vlm = image_path
@@ -398,8 +331,7 @@ async def analyze(
                 cache_seed=normalization_cache_seed,
                 enable_cache=debug_enabled,
             )
-        if debug_enabled:
-            debug_blob["stage"] = current_stage
+        debug_builder.set_stage(current_stage)
 
         if temp_file:
             try:
@@ -550,34 +482,25 @@ async def analyze(
                 },
             )
 
-        if debug_enabled:
-            debug_blob.update({
-                "stage": "pre_upsert",
-                "normalized_image": {
-                    "image_id": normalized_image.get("image_id"),
-                    "path": normalized_image.get("path"),
-                    "modality": normalized_image.get("modality"),
-                },
-                "pre_upsert_findings_len": len(normalized_findings),
-                "pre_upsert_findings_head": normalized_findings[:2],
-                "pre_upsert_report_conf": normalized_report.get("conf"),
-            })
-            debug_blob["norm_image_id"] = image_id
-            debug_blob["norm_image_id_source"] = image_id_source
-            debug_blob["storage_uri"] = storage_uri
-            debug_blob["dummy_lookup_hit"] = bool(lookup_result)
-            if lookup_source:
-                debug_blob["dummy_lookup_source"] = lookup_source
-            if not lookup_result and image_id_source != "payload":
-                debug_blob["norm_image_id_warning"] = "dummy_lookup_miss"
-            debug_blob["finding_fallback"] = dict(public_fallback, seeded_ids_head=seeded_finding_ids[:3])
-            if finding_source:
-                debug_blob["finding_source"] = finding_source
-            debug_blob["seeded_finding_ids"] = list(seeded_finding_ids)
-            debug_blob["finding_provenance"] = dict(provenance_payload)
+        debug_builder.record_identity(
+            normalized_image=normalized_image,
+            image_id=image_id,
+            image_id_source=image_id_source,
+            storage_uri=storage_uri,
+            lookup_hit=bool(lookup_result),
+            lookup_source=lookup_source,
+            warn_on_lookup_miss=(not lookup_result and image_id_source != "payload"),
+            fallback_meta=fallback_meta,
+            finding_source=finding_source,
+            seeded_finding_ids=seeded_finding_ids,
+            provenance=provenance_payload,
+            pre_upsert_findings=normalized_findings,
+            report_confidence=normalized_report.get("conf"),
+        )
 
         graph_repo = GraphRepo.from_env()
         context_builder = GraphContextBuilder(graph_repo)
+        context_orchestrator = ContextOrchestrator(context_builder)
 
         logger.info(
             "pipeline.diag.pre_graph",
@@ -614,12 +537,7 @@ async def analyze(
             normalized["image"]["image_id"] = resolved_image_id
         finding_ids = list(upsert_receipt.get("finding_ids") or [])
 
-        if debug_enabled:
-            debug_blob.update({
-                "stage": "post_upsert",
-                "upsert_receipt": upsert_receipt,
-                "post_upsert_finding_ids": finding_ids,
-            })
+        debug_builder.record_upsert(upsert_receipt, finding_ids)
 
         persisted_f_cnt = 0
         try:
@@ -655,96 +573,29 @@ async def analyze(
                 errors.append({"stage": "similarity", "msg": str(exc)})
 
         current_stage = "context"
+        limits = ContextLimits(
+            k_paths=resolved_k_paths,
+            max_chars=GRAPH_TRIPLE_CHAR_CAP,
+            alpha_finding=alpha_param,
+            beta_report=beta_param,
+            slot_overrides=slot_overrides or None,
+        )
         with timeit(timings, "context_ms"):
-            context_bundle = context_builder.build_bundle(
+            context_result = context_orchestrator.build(
                 image_id=image_id,
-                k=resolved_k_paths,
-                max_chars=GRAPH_TRIPLE_CHAR_CAP,
-                alpha_finding=alpha_param,
-                beta_report=beta_param,
-                k_slots=slot_overrides or None,
+                normalized_findings=normalized_findings,
+                graph_degraded=graph_degraded,
+                limits=limits,
             )
 
-        no_graph_evidence = False
-        findings_list: List[Dict[str, Any]] = []
-        paths_list: List[Dict[str, Any]] = []
-        ctx_paths_total = 0
-        facts: Dict[str, Any] = {}
-        try:
-            raw_facts = context_bundle.get("facts") if isinstance(context_bundle, dict) else {}
-            facts = raw_facts if isinstance(raw_facts, dict) else {}
-        except Exception:
-            facts = {}
-
-        raw_findings = facts.get("findings") if isinstance(facts, dict) else []
-        if isinstance(raw_findings, list):
-            findings_list = list(raw_findings)
-        elif raw_findings is None:
-            findings_list = []
-        else:
-            findings_list = []
-
-        if graph_degraded and not findings_list and normalized_findings:
-            fallback_findings: List[Dict[str, Any]] = []
-            for idx, finding in enumerate(normalized_findings, start=1):
-                if not isinstance(finding, dict):
-                    continue
-                fid = str(finding.get("id") or finding.get("finding_id") or f"FALLBACK_{idx}")
-                fallback_findings.append({
-                    "id": fid,
-                    "type": finding.get("type"),
-                    "location": finding.get("location"),
-                    "size_cm": finding.get("size_cm"),
-                    "conf": finding.get("conf"),
-                })
-            if fallback_findings:
-                findings_list = fallback_findings
-                facts = dict(facts or {})
-                facts.setdefault("image_id", image_id)
-                facts["findings"] = fallback_findings
-                if isinstance(context_bundle, dict):
-                    context_bundle["facts"] = facts
-
-        raw_paths: Any = []
-        try:
-            raw_paths = context_bundle.get("paths") if isinstance(context_bundle, dict) else []
-        except Exception:
-            raw_paths = []
-        if isinstance(raw_paths, list):
-            paths_list = list(raw_paths)
-        else:
-            paths_list = []
-
-        if not paths_list and findings_list:
-            slot_limits = context_bundle.get("slot_limits") if isinstance(context_bundle, dict) else None
-            fallback_budget = 0
-            if isinstance(slot_limits, dict):
-                try:
-                    fallback_budget = max(int(slot_limits.get("findings", 0)), 0)
-                except (TypeError, ValueError):
-                    fallback_budget = 0
-            if fallback_budget == 0:
-                fallback_budget = min(len(findings_list), 2)
-            fallback_paths = _fallback_paths_from_findings(image_id, findings_list, fallback_budget)
-            if fallback_paths:
-                paths_list = fallback_paths
-                if isinstance(context_bundle, dict):
-                    context_bundle["paths"] = paths_list
-                    _ensure_findings_slot_allocation(context_bundle, len(paths_list))
-
-        if not findings_list and not paths_list and len(finding_ids) == 0:
-            no_graph_evidence = True
-        elif graph_degraded and not findings_list and normalized_findings:
-            findings_list = list(normalized_findings)
-            facts = dict(facts or {})
-            facts.setdefault("image_id", image_id)
-            facts["findings"] = findings_list
-            if isinstance(context_bundle, dict):
-                context_bundle["facts"] = facts
-
-        ctx_paths_total = sum(len(path.get("triples") or []) for path in paths_list)
+        context_bundle = context_result.bundle
+        facts = context_result.facts
+        findings_list = context_result.findings
+        paths_list = context_result.paths
+        ctx_paths_total = context_result.path_triple_total
+        graph_paths_strength = context_result.graph_paths_strength
+        no_graph_evidence = context_result.no_graph_evidence and len(finding_ids) == 0
         has_paths = len(paths_list) > 0
-        graph_paths_strength = _graph_paths_strength(len(paths_list), ctx_paths_total)
 
         if isinstance(context_bundle, dict):
             context_bundle.setdefault("finding_source", finding_source)
@@ -752,24 +603,18 @@ async def analyze(
             context_bundle.setdefault("finding_fallback", dict(public_fallback))
             context_bundle.setdefault("finding_provenance", dict(provenance_payload))
 
-        if debug_enabled:
-            debug_blob.update({
-                "stage": "context",
-                "context_summary": context_bundle.get("summary"),
-                "context_findings_len": len(findings_list),
-                "context_findings_head": findings_list[:2],
-                "context_paths_len": len(paths_list),
-                "context_paths_head": paths_list[:2],
-                "context_paths_triple_total": ctx_paths_total,
-                "graph_paths_strength": graph_paths_strength,
-                "context_slot_limits": context_bundle.get("slot_limits"),
-                "similar_seed_images": similar_seed_images,
-                "similarity_edges_created": similarity_edges_created,
-                "similarity_threshold": similarity_threshold,
-                "similarity_candidates_considered": similarity_candidates_debug,
-            })
-            if graph_degraded:
-                debug_blob["graph_degraded"] = True
+        debug_builder.record_context(
+            context_bundle=context_bundle if isinstance(context_bundle, dict) else {},
+            findings=findings_list,
+            paths=paths_list,
+            total_triples=ctx_paths_total,
+            graph_paths_strength=graph_paths_strength,
+            similar_seed_images=similar_seed_images,
+            similarity_edges_created=similarity_edges_created,
+            similarity_threshold=similarity_threshold,
+            similarity_candidates_considered=similarity_candidates_debug,
+            graph_degraded=graph_degraded,
+        )
 
         results: Dict[str, Dict[str, Any]] = {}
 
@@ -878,23 +723,6 @@ async def analyze(
                         entry["degraded"] = "graph_mismatch"
                         entry.setdefault("notes", "mismatch with graph-backed output")
 
-        if debug_enabled:
-            debug_blob.setdefault("normalized_image", {
-                "image_id": normalized_image.get("image_id"),
-                "path": normalized_image.get("path"),
-                "modality": normalized_image.get("modality"),
-            })
-            debug_blob.setdefault("pre_upsert_findings_len", len(normalized_findings))
-            debug_blob.setdefault("pre_upsert_findings_head", normalized_findings[:2])
-            debug_blob.setdefault("pre_upsert_report_conf", normalized_report.get("conf"))
-            debug_blob.setdefault("upsert_receipt", upsert_receipt)
-            debug_blob.setdefault("post_upsert_finding_ids", finding_ids)
-            debug_blob.setdefault("context_summary", context_bundle.get("summary"))
-            debug_blob.setdefault("context_findings_len", len((facts.get("findings") or []) if isinstance(facts, dict) else []))
-            debug_blob.setdefault("context_findings_head", (facts.get("findings") or [])[:2] if isinstance(facts, dict) else [])
-            debug_blob.setdefault("context_paths_len", len(paths_list))
-            debug_blob.setdefault("context_paths_head", paths_list[:2])
-
         weights = {"V": 1.0, "VL": 1.2, "VGL": 1.0}
         if has_paths:
             weights["VGL"] = 1.8
@@ -909,7 +737,7 @@ async def analyze(
             graph_paths_strength=graph_paths_strength,
         )
         results["consensus"] = consensus
-        debug_blob["consensus"] = consensus
+        debug_builder.record_consensus(consensus)
         if vgl_fallback_used:
             consensus = dict(consensus)
             consensus["status"] = "low_confidence"
@@ -921,7 +749,7 @@ async def analyze(
             consensus["notes"] = f"{existing_notes} | {fallback_note}" if existing_notes else fallback_note
             consensus.setdefault("presented_text", consensus.get("text") or "")
             results["consensus"] = consensus
-            debug_blob["consensus"] = consensus
+            debug_builder.record_consensus(consensus)
             results["status"] = "low_confidence"
 
         for mode in ("V", "VL", "VGL"):
@@ -1020,8 +848,7 @@ async def analyze(
         evaluation_payload["finding_fallback"] = dict(public_fallback)
         evaluation_payload["finding_provenance"] = dict(provenance_payload)
 
-        if debug_enabled:
-            debug_blob["evaluation"] = evaluation_payload
+        debug_builder.record_evaluation(evaluation_payload)
 
         response = {
             "ok": True,
@@ -1031,7 +858,7 @@ async def analyze(
             "results": results,
             "timings": timings,
             "errors": errors,
-            "debug": debug_blob if debug_enabled else {},
+            "debug": debug_builder.payload(),
             "evaluation": evaluation_payload,
         }
         if overall_status:
