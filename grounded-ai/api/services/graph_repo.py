@@ -481,7 +481,7 @@ class GraphRepo:
             "report": params.get("report"),
             "findings": params.get("findings") or [],
         }
-        logger.warning(
+        logger.info(
             "graph.upsert.params image=%s finding_ids=%s finding_cnt=%s",
             neo4j_params["image"].get("image_id"),
             [f.get("id") for f in neo4j_params.get("findings")],
@@ -508,7 +508,7 @@ class GraphRepo:
                     [f.get("id") for f in neo4j_params.get("findings")],
                 )
                 return {"image_id": neo4j_params["image"]["image_id"], "finding_ids": []}
-            logger.warning(
+            logger.info(
                 "graph.upsert.receipt image=%s finding_ids=%s",
                 rec.get("image_id"),
                 rec.get("finding_ids"),

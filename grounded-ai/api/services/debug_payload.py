@@ -154,6 +154,11 @@ class DebugPayloadBuilder:
             return
         self._payload["evaluation"] = dict(evaluation)
 
+    def record_fallback_history(self, history: List[Dict[str, Any]]) -> None:
+        if not self.enabled:
+            return
+        self._payload["finding_fallback_history"] = [dict(entry) for entry in history]
+
     def payload(self) -> Dict[str, Any]:
         return dict(self._payload) if self.enabled else {}
 

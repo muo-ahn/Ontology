@@ -355,6 +355,7 @@ async def normalize_from_vlm(
         "registry_hit": fallback_registry_hit,
         "strategy": fallback_strategy if fallback_used else None,
         "force": force_dummy_fallback,
+        "forced": bool(force_dummy_fallback),
     }
     if cache_key:
         _store_cached_normalized(cache_key, normalized)

@@ -27,6 +27,7 @@ from services.dedup import dedup_findings
 from services.finding_validation import FindingValidationError, validate_findings_payload
 from services.finding_verifier import FindingVerifier
 from services.graph_repo import GraphRepo
+from services.fallback_meta import FallbackMeta, FallbackMetaError, coerce_fallback_meta
 from services.image_identity import ImageIdentityError, identify_image
 from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
@@ -466,11 +467,15 @@ async def analyze(
 
         # Preserve whatever the normalizer decided; we only ever augment this blob to avoid
         # clobbering evidence about seeded findings during later normalization passes.
-        fallback_meta = dict(normalized.get("finding_fallback") or {})
-        fallback_used = bool(fallback_meta.get("used"))
-        fallback_strategy = fallback_meta.get("strategy")
-        fallback_registry_hit = bool(fallback_meta.get("registry_hit"))
-        fallback_forced = bool(fallback_meta.get("force")) or force_dummy_fallback
+        fallback_meta = coerce_fallback_meta(normalized.get("finding_fallback"))
+        fallback_guard = FallbackMetaGuard(fallback_meta, stage="normalized_init")
+        if force_dummy_fallback:
+            fallback_meta = fallback_meta.mark_forced()
+            fallback_guard.update(fallback_meta, stage="forced_param")
+        fallback_used = fallback_meta.used
+        fallback_strategy = fallback_meta.strategy
+        fallback_registry_hit = fallback_meta.registry_hit
+        fallback_forced = fallback_meta.forced
 
         seeded_applied = False
         if (force_dummy_fallback or not normalized_findings) and seeded_records:
@@ -519,14 +524,17 @@ async def analyze(
             "forced": fallback_forced,
             "seeded_ids": list(seeded_finding_ids),
         }
-        fallback_meta.update(dict(public_fallback))
-        fallback_meta["seeded_ids_head"] = seeded_finding_ids[:3]
-        normalized["finding_fallback"] = fallback_meta
+        fallback_meta = fallback_meta.model_copy(update=public_fallback)
+        fallback_meta = fallback_meta.with_seeded_ids(list(seeded_finding_ids))
+        fallback_guard.update(fallback_meta, stage="public_payload")
+        fallback_meta_dict = fallback_guard.snapshot("normalized_payload")
+        fallback_meta_dict["seeded_ids_head"] = seeded_finding_ids[:3]
+        normalized["finding_fallback"] = fallback_meta_dict
         normalized["finding_source"] = finding_source
         provenance_payload = {
             "finding_source": finding_source,
             "seeded_finding_ids": list(seeded_finding_ids),
-            "finding_fallback": dict(public_fallback),
+            "finding_fallback": fallback_guard.snapshot("provenance_payload"),
         }
         normalized["finding_provenance"] = dict(provenance_payload)
 
@@ -551,7 +559,7 @@ async def analyze(
             lookup_hit=bool(lookup_result),
             lookup_source=lookup_source,
             warn_on_lookup_miss=(not lookup_result and image_id_source != "payload"),
-            fallback_meta=fallback_meta,
+            fallback_meta=fallback_guard.snapshot("debug_identity"),
             finding_source=finding_source,
             seeded_finding_ids=seeded_finding_ids,
             provenance=provenance_payload,
@@ -627,6 +635,14 @@ async def analyze(
                     raw_payload=graph_payload,
                     prepared_payload=prepared_graph_payload,
                 )
+            logger.info(
+                "pipeline.upsert.metrics case=%s image=%s expected_cnt=%s receipt_cnt=%s verified_cnt=%s",
+                case_id,
+                image_id,
+                len(expected_finding_ids),
+                len(finding_ids),
+                len(verified_finding_ids),
+            )
 
         debug_builder.record_upsert(upsert_receipt, finding_ids, verified_ids=verified_finding_ids or finding_ids)
 
@@ -678,7 +694,7 @@ async def analyze(
         if isinstance(context_bundle, dict):
             context_bundle.setdefault("finding_source", finding_source)
             context_bundle.setdefault("seeded_finding_ids", list(seeded_finding_ids))
-            context_bundle.setdefault("finding_fallback", dict(public_fallback))
+            context_bundle.setdefault("finding_fallback", fallback_guard.snapshot("context_bundle"))
             context_bundle.setdefault("finding_provenance", dict(provenance_payload))
 
         debug_builder.record_context(
@@ -850,7 +866,8 @@ async def analyze(
             results["finding_source"] = finding_source
         if seeded_finding_ids:
             results["seeded_finding_ids"] = seeded_finding_ids
-        results["finding_fallback"] = dict(public_fallback)
+        public_fallback_snapshot = fallback_guard.snapshot("results_payload")
+        results["finding_fallback"] = public_fallback_snapshot
         results["finding_provenance"] = dict(provenance_payload)
 
         # --- Post-consensus safety filter ---
@@ -923,10 +940,12 @@ async def analyze(
             evaluation_payload["notes"] = evaluation_consensus.get("notes")
         evaluation_payload["finding_source"] = finding_source
         evaluation_payload["seeded_finding_ids"] = seeded_finding_ids
-        evaluation_payload["finding_fallback"] = dict(public_fallback)
+        evaluation_payload["finding_fallback"] = fallback_guard.snapshot("evaluation_payload")
         evaluation_payload["finding_provenance"] = dict(provenance_payload)
 
         debug_builder.record_evaluation(evaluation_payload)
+        if debug_enabled:
+            debug_builder.record_fallback_history(fallback_guard.history)
 
         response = {
             "ok": True,
@@ -939,6 +958,8 @@ async def analyze(
             "debug": debug_builder.payload(),
             "evaluation": evaluation_payload,
         }
+        fallback_guard.ensure(results["finding_fallback"], stage="response.results")
+        fallback_guard.ensure(evaluation_payload["finding_fallback"], stage="response.evaluation")
         if overall_status:
             response["status"] = overall_status
         if overall_notes:

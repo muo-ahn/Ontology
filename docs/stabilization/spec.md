@@ -115,6 +115,15 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 
 ---
 
+### 🔹 코드 체크 (2025-11-13 기준)
+
+* `grounded-ai/api/routers/pipeline.py:360-520` – VLM 결과를 정규화한 뒤 `fallback_meta = dict(normalized.get("finding_fallback") or {})`로 얕은 복사 후 여러 필드(`used`, `registry_hit`, `force`)를 서로 다른 분기에서 갱신하고 있어, 이후 단계가 동일 dict를 참조한다는 보장이 없다.
+* `grounded-ai/api/services/context_orchestrator.py:50-118` – `fallback_meta`나 `finding_source`를 건드리지 않지만, `graph_context_builder`는 fallback 세부 정보를 모른 채 빈 dict를 생성하여 최종 결과에서 `finding_fallback.used`가 원래 상태를 잃는다.
+* `grounded-ai/api/services/debug_payload.py:30-87` – `record_identity()` 호출 시 넘어온 dict를 그대로 `self._payload["finding_fallback"]`에 저장하므로, 이후 파이프라인에서 다른 dict를 덮어쓰면 debug에도 상이한 값이 기록된다.
+* `scripts/vision_pipeline_debug.sh` 결과 (`[9] Debug with parameters`) – `force_dummy_fallback=true`를 줬는데도 `finding_fallback.used=false`가 유지되는 사례가 다수 재현됨.
+
+---
+
 ### 🔹 수정 목표
 
 1. **단일 소스 구조체 도입**
@@ -138,6 +147,22 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
    * 중간 단계에서 수정 시 Exception 발생.
 
 ---
+
+### 🔹 Spec-02 액션 플랜
+
+1. **Immutable Fallback 모델화** – `grounded-ai/api/services/fallback_meta.py`(신규) 등에 `FallbackMeta(BaseModel, frozen=True)`를 정의하고, `normalize_from_vlm()`이 해당 객체를 반환하도록 수정. 파이프라인에서는 `dict(...)` 복사 대신 FallbackMeta 인스턴스를 공유하고, 값을 바꿔야 할 경우 `model_copy(update=...)`만 허용.
+2. **Force 플래그 일관 전달** – `pipeline.analyze()`에서 `force_dummy_fallback`을 해석할 때 `FallbackMeta.forced`와 `used`를 동시에 true로 세팅하고, 이후 `ContextBuilder`, `DebugPayloadBuilder`, `results.finding_fallback`까지 동일 객체/사전이 전달되도록 setter 유틸리티를 추가.
+3. **재할당 방지 가드** – `DebugPayloadBuilder.record_identity()` 및 후속 단계에서 `finding_fallback`을 재생성하면 `ValidationError`를 일으키도록 타입 가드를 넣고, pytest에서 `force_dummy_fallback=true` 시 `used`/`forced`가 true로 유지되는지 검증(`tests/test_fallback_integrity.py` 등).
+4. **관측 가능성 확보** – `scripts/vision_pipeline_debug.sh` / `/pipeline/analyze?debug=1` 결과에 `finding_fallback_history`(예: stage별 snapshot)나 최소한 `fallback_meta.source_stage`를 남겨 추후 회귀 분석이 가능하도록 한다.
+5. **CI 커버리지** – FastAPI router 수준에서 `force_dummy_fallback=true`를 붙여 호출하는 통합 테스트를 추가하여, `finding_fallback.used`/`forced`가 응답과 debug payload 양쪽에서 true인지 확인하고, 실패 시 CI가 즉시 잡도록 `.github/workflows/ci.yml`에 포함한다.
+
+---
+
+### 🔹 진행 상황 요약 (2025-11-13)
+
+- `finding_fallback`은 `FallbackMeta`(불변 Pydantic 모델)로 관리되며, `force_dummy_fallback=true`일 때 `used/force/forced`가 전 단계에서 `True`로 유지된다. `/pipeline/analyze` 결과, `graph_context`, `results`, `evaluation`, Debug payload 모두 동일 값을 노출한다.
+- `vision_pipeline_debug.sh` 재현 (IMG_001, IMG_003, IMG201) 기준, `finding_source`가 `fallback` 혹은 `mock_seed`로 일관되게 노출되며 seeded ID가 있을 경우 그대로 유지된다.
+- 아직 재할당 감지(ValidationError)와 pytest/CI 보강, fallback 변경 이력 기록은 미구현 상태이므로 향후 작업 필요.
 
 ### 🔹 검증 기준
 
