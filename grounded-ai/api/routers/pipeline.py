@@ -278,15 +278,55 @@ async def analyze(
         except FindingValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.detail) from exc
 
-    def _raise_upsert_mismatch(expected_ids: List[str], receipt_ids: List[str], verified_ids: List[str]) -> None:
-        detail_errors = [{
+    def _safe_preview(value: Any, limit: int = 2) -> Any:
+        if isinstance(value, list):
+            return value[:limit]
+        if isinstance(value, dict):
+            preview = dict(value)
+            findings = preview.get("findings")
+            if isinstance(findings, list):
+                preview["findings"] = findings[:limit]
+            return preview
+        return value
+
+    def _format_preview(value: Any) -> str:
+        try:
+            import json
+
+            return json.dumps(_safe_preview(value), ensure_ascii=False)
+        except Exception:
+            return repr(_safe_preview(value))
+
+    def _raise_upsert_mismatch(
+        *,
+        expected_ids: List[str],
+        receipt_ids: List[str],
+        verified_ids: List[str],
+        errors_acc: List[Dict[str, Any]],
+        case_id: Optional[str],
+        image_id: Optional[str],
+        raw_payload: Dict[str, Any],
+        prepared_payload: Dict[str, Any],
+    ) -> None:
+        error_entry = {
             "stage": "upsert",
             "msg": "finding_upsert_mismatch",
             "expected_ids": sorted(set(expected_ids)),
             "receipt_ids": sorted(set(receipt_ids)),
             "verified_ids": sorted(set(verified_ids)),
-        }]
-        raise HTTPException(status_code=500, detail={"ok": False, "errors": detail_errors})
+        }
+        logger.error(
+            "pipeline.upsert.mismatch case=%s image=%s expected=%s receipt=%s verified=%s raw=%s prepared=%s",
+            case_id,
+            image_id,
+            error_entry["expected_ids"],
+            error_entry["receipt_ids"],
+            error_entry["verified_ids"],
+            _format_preview(raw_payload),
+            _format_preview(prepared_payload),
+        )
+        errors_acc.append(error_entry)
+        raise HTTPException(status_code=500, detail={"ok": False, "errors": errors_acc})
 
     def _resolve_confidence_level(score: float, path_triples: int) -> str:
         if score >= 0.7 and path_triples >= 3:
@@ -549,6 +589,9 @@ async def analyze(
             "findings": normalized_findings,
             "idempotency_key": payload.idempotency_key,
         }
+        prepared_graph_payload = graph_repo.prepare_upsert_parameters(graph_payload)
+        if debug_enabled:
+            debug_builder.record_upsert_payload(raw_payload=graph_payload, prepared_payload=prepared_graph_payload)
         with timeit(timings, "upsert_ms"):
             upsert_receipt_raw = graph_repo.upsert_case(graph_payload)
         upsert_receipt = dict(upsert_receipt_raw or {})
@@ -574,7 +617,16 @@ async def analyze(
             receipt_set = set(finding_ids)
             verified_set = set(verified_finding_ids)
             if not receipt_set or not verification.matches or receipt_set != verified_set:
-                _raise_upsert_mismatch(expected_finding_ids, finding_ids, verified_finding_ids)
+                _raise_upsert_mismatch(
+                    expected_ids=expected_finding_ids,
+                    receipt_ids=finding_ids,
+                    verified_ids=verified_finding_ids,
+                    errors_acc=errors,
+                    case_id=case_id,
+                    image_id=image_id,
+                    raw_payload=graph_payload,
+                    prepared_payload=prepared_graph_payload,
+                )
 
         debug_builder.record_upsert(upsert_receipt, finding_ids, verified_ids=verified_finding_ids or finding_ids)
 

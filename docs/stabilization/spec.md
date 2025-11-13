@@ -49,7 +49,7 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
    verified_ids = repo.verify_findings(image_id, [f.id for f in findings])
    assert set(verified_ids) == set(result.finding_ids)
    ```
-2. **Validation Layer 명시화**
+2. **Validation Layer 명시화 + fallback 메타 처리**
 
    ```python
    class FindingSchema(BaseModel):
@@ -60,8 +60,12 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
        size_cm: Optional[float]
    ```
 
-   → type/location/conf/size_cm 중 하나라도 누락 시 hard error 발생.
-3. **에러 정책 변경**
+   → type/location/conf/size_cm 중 하나라도 누락 시 hard error 발생. 단, fallback 시 주입되는 `source`, `model` 등의 보조 필드는 검증 전에 분리/저장 후 검증 통과 뒤 다시 주입(또는 `extra="ignore"` 설정)하여 시드 데이터가 막히지 않도록 한다.
+3. **그래프 업서트 파라미터 추적**
+
+   * `graph_payload` 원본과 `_prepare_upsert_parameters()` 결과를 debug payload에 기록한다.
+   * Neo4j MERGE 직후 반환된 `finding_ids`를 동일 blob에 포함시켜 재현성을 확보한다.
+4. **에러 정책 변경**
 
    * 기존: fail → degraded fallback
    * 변경: fail → explicit error `{"stage":"upsert","msg":"finding_upsert_mismatch"}`

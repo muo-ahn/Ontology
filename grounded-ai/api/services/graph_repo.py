@@ -38,14 +38,8 @@ WITH img,
          WHEN img.storage_uri IS NULL OR trim(img.storage_uri) = '' THEN NULL
          ELSE trim(img.storage_uri)
      END AS storage_uri
-CALL {
-  WITH storage_uri
-  WITH storage_uri WHERE storage_uri IS NOT NULL
-  MATCH (existing:Image {storage_uri: storage_uri})
-  RETURN existing
-}
-WITH img, storage_uri, existing
-WITH img, storage_uri,
+OPTIONAL MATCH (existing:Image {storage_uri: storage_uri})
+WITH img, storage_uri, existing,
      coalesce(existing.image_id, img.image_id) AS resolved_id
 MERGE (i:Image {image_id: resolved_id})
 SET  i.path = coalesce(img.path, i.path),
@@ -435,7 +429,7 @@ class GraphRepo:
                 logger.exception("Neo4j read query failed: %s params=%s", query.strip().splitlines()[0], parameters)
                 raise
 
-    def _prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = deepcopy(payload)
 
         image = data.get("image") or {}
@@ -481,12 +475,18 @@ class GraphRepo:
         return data
 
     def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        params = self._prepare_upsert_parameters(payload)
+        params = self.prepare_upsert_parameters(payload)
         neo4j_params = {
             "image": dict(params.get("image") or {}),
             "report": params.get("report"),
             "findings": params.get("findings") or [],
         }
+        logger.warning(
+            "graph.upsert.params image=%s finding_ids=%s finding_cnt=%s",
+            neo4j_params["image"].get("image_id"),
+            [f.get("id") for f in neo4j_params.get("findings")],
+            len(neo4j_params.get("findings")),
+        )
 
         def _tx_fn(tx):
             image = neo4j_params["image"]
@@ -502,7 +502,17 @@ class GraphRepo:
                 image["path"] = str(path_value)
             rec = tx.run(UPSERT_CASE_QUERY, neo4j_params).single()
             if rec is None:
+                logger.error(
+                    "graph.upsert.empty_return image=%s findings=%s",
+                    neo4j_params["image"].get("image_id"),
+                    [f.get("id") for f in neo4j_params.get("findings")],
+                )
                 return {"image_id": neo4j_params["image"]["image_id"], "finding_ids": []}
+            logger.warning(
+                "graph.upsert.receipt image=%s finding_ids=%s",
+                rec.get("image_id"),
+                rec.get("finding_ids"),
+            )
             return {
                 "image_id": rec.get("image_id"),
                 "finding_ids": rec.get("finding_ids") or []

@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 __all__ = ["FindingSchema", "FindingValidationError", "validate_findings_payload"]
 
+CORE_FIELDS = {"id", "type", "location", "conf", "size_cm"}
+
 
 class FindingValidationError(ValueError):
     """Raised when a finding payload fails schema validation."""
@@ -63,10 +65,14 @@ def validate_findings_payload(findings: Iterable[Dict[str, Any]]) -> List[Dict[s
 
     validated: List[Dict[str, Any]] = []
     for idx, finding in enumerate(findings or []):
+        finding_dict = dict(finding or {})
+        core_fields = {key: finding_dict.get(key) for key in CORE_FIELDS if key in finding_dict}
+        extra_fields = {key: value for key, value in finding_dict.items() if key not in CORE_FIELDS}
         try:
-            schema = FindingSchema.model_validate(finding)
+            schema = FindingSchema.model_validate(core_fields)
         except ValidationError as exc:  # pragma: no cover - pydantic supplies detail
             raise FindingValidationError(index=idx, errors=exc.errors()) from exc
-        validated.append(schema.model_dump())
+        normalized = schema.model_dump()
+        normalized.update(extra_fields)
+        validated.append(normalized)
     return validated
-

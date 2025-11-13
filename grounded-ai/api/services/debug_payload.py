@@ -16,6 +16,18 @@ class DebugPayloadBuilder:
         self.enabled = enabled
         self._payload: Dict[str, Any] = {"stage": initial_stage} if enabled else {}
 
+    @staticmethod
+    def _safe_value(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, list):
+            return [DebugPayloadBuilder._safe_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [DebugPayloadBuilder._safe_value(item) for item in value]
+        if isinstance(value, dict):
+            return {str(k): DebugPayloadBuilder._safe_value(v) for k, v in value.items()}
+        return str(value)
+
     def set_stage(self, stage: str) -> None:
         if not self.enabled:
             return
@@ -84,6 +96,19 @@ class DebugPayloadBuilder:
         if verified_ids is not None:
             payload["post_upsert_verified_ids"] = list(verified_ids)
         self._payload.update(payload)
+
+    def record_upsert_payload(
+        self,
+        *,
+        raw_payload: Dict[str, Any],
+        prepared_payload: Dict[str, Any],
+    ) -> None:
+        if not self.enabled:
+            return
+        self._payload["upsert_payload"] = {
+            "raw": self._safe_value(raw_payload),
+            "prepared": self._safe_value(prepared_payload),
+        }
 
     def record_context(
         self,
