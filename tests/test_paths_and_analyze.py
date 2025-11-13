@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from services.graph_repo import GraphRepo
 from services.dummy_registry import LookupResult
-from services.context_pack import GraphContextBuilder as RealGraphContextBuilder
+from services.context_pack import GraphContextBuilder as RealGraphContextBuilder, GraphContextResult
 from routers import pipeline as pipeline_module
 
 
@@ -80,6 +80,15 @@ class _PipelineHarness:
                 instance = cls()
                 harness.instances.append(instance)
                 return instance
+
+            def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+                return payload
+
+            def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+                if expected_ids is None:
+                    storage = harness.storage_records.get(image_id, set())
+                    return list(storage)
+                return list(expected_ids)
 
             def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
                 image = payload.get("image") or {}
@@ -196,6 +205,12 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
         def from_env(cls) -> "FakeGraphRepo":
             return cls()
 
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return payload
+
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(expected_ids or [])
+
         def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
             image_payload = payload.get("image") or {}
             image_id = image_payload.get("image_id", "UNKNOWN")
@@ -229,6 +244,35 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
                 "slot_limits": {"findings": 0, "reports": 0, "similarity": 0},
                 "triples": "",
             }
+
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float],
+            beta_report: Optional[float],
+            k_slots: Optional[Dict[str, int]],
+        ) -> GraphContextResult:
+            payload = self.build_bundle()
+            slot_limits = dict(payload.get("slot_limits", {}))
+            slot_meta = {
+                "requested_k": max(int(k), 0),
+                "applied_k": max(int(k), 0),
+                "slot_source": "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity")),
+            }
+            return GraphContextResult(
+                summary=list(payload.get("summary", [])),
+                summary_rows=list(payload.get("summary_rows", [])),
+                paths=list(payload.get("paths", [])),
+                facts=dict(payload.get("facts", {})),
+                triples_text=str(payload.get("triples", "")),
+                slot_limits=slot_limits,
+                slot_meta=slot_meta,
+            )
 
         def close(self) -> None:
             return None
@@ -267,6 +311,18 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
     assert response.status_code == 200, response.text
     payload = response.json()
 
+    graph_context = payload.get("graph_context", {})
+    debug_blob = payload.get("debug", {})
+    evaluation = payload.get("evaluation", {})
+    assert graph_context.get("fallback_reason") == "no_graph_paths"
+    assert graph_context.get("fallback_used") is True
+    assert graph_context.get("no_graph_evidence") is True
+    assert debug_blob.get("context_fallback_reason") == "no_graph_paths"
+    assert debug_blob.get("context_fallback_used") is True
+    assert debug_blob.get("context_no_graph_evidence") is True
+    assert evaluation.get("context_fallback_reason") == "no_graph_paths"
+    assert evaluation.get("context_fallback_used") is True
+
     results = payload.get("results", {})
     consensus = results.get("consensus", {})
 
@@ -289,6 +345,12 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
         @classmethod
         def from_env(cls) -> "FakeGraphRepo":
             return cls()
+
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return payload
+
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(expected_ids or [])
 
         def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
             image_payload = payload.get("image") or {}
@@ -336,6 +398,35 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
                 "slot_limits": {"findings": 2, "reports": 0, "similarity": 0},
                 "triples": "Image[US001] -HAS_FINDING-> Finding[F201]",
             }
+
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float],
+            beta_report: Optional[float],
+            k_slots: Optional[Dict[str, int]],
+        ) -> GraphContextResult:
+            payload = self.build_bundle()
+            slot_limits = dict(payload.get("slot_limits", {}))
+            slot_meta = {
+                "requested_k": max(int(k), 0),
+                "applied_k": max(int(k), 0),
+                "slot_source": "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity")),
+            }
+            return GraphContextResult(
+                summary=list(payload.get("summary", [])),
+                summary_rows=list(payload.get("summary_rows", [])),
+                paths=list(payload.get("paths", [])),
+                facts=dict(payload.get("facts", {})),
+                triples_text=str(payload.get("triples", "")),
+                slot_limits=slot_limits,
+                slot_meta=slot_meta,
+            )
 
         def close(self) -> None:
             return None

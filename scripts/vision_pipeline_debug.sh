@@ -81,4 +81,4 @@ echo ""
 echo "=== [10-2] E2E sync test (no parameters, with jq filter) ==="
 curl -sS -X POST "http://localhost:8000/pipeline/analyze?sync=true&debug=1" \
   -H 'Content-Type: application/json' \
-  -d "$(build_body without_params)" | jq '{slots: .debug.context_slot_limits, paths: .graph_context.paths}'
+  -d "$(build_body without_params)" | jq '{slots: .debug.context_slot_limits, paths: .graph_context.paths, context_fallback: {used: .graph_context.fallback_used, reason: .graph_context.fallback_reason, no_graph_evidence: .graph_context.no_graph_evidence}}'

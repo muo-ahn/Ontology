@@ -243,6 +243,15 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 - `DebugPayloadBuilder`는 `context_consistency`와 `context_consistency_reason`을 기록하고, 파이프라인은 paths vs. triples 불일치 감지 시 `errors` 배열에 `{"stage":"context","msg":"facts_paths_mismatch"}`를 추가한다.
 - 남은 항목: `build_context()`/`ContextResult`를 활용하는 pytest 보강(`tests/test_context_orchestrator.py`, `tests/test_paths_and_analyze.py`)이 일부 적용되었으나, CI에서 강제 실행되도록 워크플로우 업데이트와 더 다양한 경로/summary 일관성 케이스를 추가할 필요가 있다.
 
+### ✅ Spec-03 최근 검증 (2025-02-15)
+
+- `./scripts/vision_pipeline_debug.sh`를 IMG_001·IMG_003·IMG201 더미 케이스에 실행해 `context_paths`, `facts`, `triples`가 모두 동일 Neo4j 쿼리 기반으로 내려오는지 재확인했다.
+- 세 케이스 모두 `paths_len=0`일 때 `graph_context.triples`가 "[EVIDENCE PATHS] No path generated (0/2)"로 표기됐고, `graph_context.facts.findings`와 `context_findings_head` 내용도 완전히 일치해 Spec-03 검증표 1·2항을 통과했다.
+- Debug payload의 `context_consistency=true`이며 `errors` 배열에서도 `facts_paths_mismatch`가 보고되지 않아 자동 self-check도 성공했다.
+- 다만 `graph_context.fallback_reason` 같은 표준화된 이유 필드는 아직 응답에 노출되지 않았으므로 ContextOrchestrator 개선 플랜 2번(표준 필드 노출 + pytest/CI 검증) 마무리가 필요하다.
+- 세부 로그와 후속 액션 아이템은 `docs/stabilization/spec03_verification.md`에 추가 기록했다.
+
+
 ## ✅ [Spec-04] 슬롯 리밸런싱 개선 (Slot Rebalancing Fix)
 
 ### 🔹 목적

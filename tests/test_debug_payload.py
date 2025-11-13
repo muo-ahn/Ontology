@@ -45,11 +45,17 @@ def test_builder_context_marks_graph_degrade():
         similarity_threshold=0.5,
         similarity_candidates_considered=10,
         graph_degraded=True,
+        fallback_used=True,
+        fallback_reason="no_graph_paths",
+        no_graph_evidence=True,
     )
     payload = builder.payload()
     assert payload["graph_degraded"] is True
     assert payload["context_paths_len"] == 1
     assert payload["graph_paths_strength"] == 0.5
+    assert payload["context_fallback_used"] is True
+    assert payload["context_fallback_reason"] == "no_graph_paths"
+    assert payload["context_no_graph_evidence"] is True
 
 
 def test_builder_disabled_no_payload():

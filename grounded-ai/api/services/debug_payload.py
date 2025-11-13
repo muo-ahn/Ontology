@@ -125,6 +125,9 @@ class DebugPayloadBuilder:
         graph_degraded: bool,
         context_consistency: Optional[bool] = None,
         context_consistency_reason: Optional[str] = None,
+        fallback_used: Optional[bool] = None,
+        fallback_reason: Optional[str] = None,
+        no_graph_evidence: Optional[bool] = None,
     ) -> None:
         if not self.enabled:
             return
@@ -149,6 +152,12 @@ class DebugPayloadBuilder:
             self._payload["context_consistency"] = context_consistency
             if not context_consistency and context_consistency_reason:
                 self._payload["context_consistency_reason"] = context_consistency_reason
+        if fallback_used is not None:
+            self._payload["context_fallback_used"] = bool(fallback_used)
+        if fallback_reason:
+            self._payload["context_fallback_reason"] = fallback_reason
+        if no_graph_evidence is not None:
+            self._payload["context_no_graph_evidence"] = bool(no_graph_evidence)
 
     def record_consensus(self, consensus: Dict[str, Any]) -> None:
         if not self.enabled:
