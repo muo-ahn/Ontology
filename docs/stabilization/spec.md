@@ -187,6 +187,15 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 
 ---
 
+### 🔹 코드 체크 (2025-11-13 기준)
+
+* `grounded-ai/api/services/context_orchestrator.py:34-125` – `ContextOrchestrator.build()`가 `GraphContextBuilder`의 bundle을 받은 뒤에도 `normalized_findings` 기반 fallback 경로/팩트를 직접 합성한다. 이때 그래프가 실제로 경로를 반환했더라도 `_fallback_paths_from_findings()`가 덮어쓰는 경우가 발생한다.
+* `grounded-ai/api/services/context_pack.py:1-220` – `GraphContextBuilder`는 `bundle["paths"]`, `bundle["facts"]`, `bundle["summary"]`를 동시에 구성하지만, fallback 삽입 시 summary 문자열(`[EDGE SUMMARY] ... 데이터 없음`)이 여전히 그래프 집계 결과를 포함하여 동일 응답 내에서 불일치가 생긴다.
+* `grounded-ai/api/routers/pipeline.py:640-720` – `/pipeline/analyze`는 `context_bundle`에서 `facts`, `paths`, `triples`를 각각 다른 키로 추출하여 `results.graph_context`, `debug.context_*`에 채운다. fallback 경로가 삽입되면 facts/paths는 fallback을 가리키지만 summary/triples 문자열은 기존 그래프 데이터를 유지해 “No path generated” vs 실제 path 리스트가 동시에 노출된다.
+* `scripts/vision_pipeline_debug.sh` – 현재도 `context_paths_len=0`인데 `[EVIDENCE PATHS] 데이터 없음`과 facts JSON에 fallback findings가 공존하는 사례가 재현된다.
+
+---
+
 ### 🔹 수정 목표
 
 1. **컨텍스트 생성기 내부 구조 변경**
@@ -208,6 +217,16 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 
 ---
 
+### 🔹 Spec-03 액션 플랜
+
+1. **GraphContextBuilder 일원화** – `grounded-ai/api/services/context_pack.py`에 `GraphContextResult` dataclass를 추가하고, `build_bundle()` 대신 `build_context()`가 `paths/facts/summary`를 단일 객체로 반환하도록 개편. `query_bundle()`/`query_paths()` 호출은 한 번만 수행하여 동일 소스에서 나온 데이터를 공유한다.
+2. **ContextOrchestrator 단순화** – `grounded-ai/api/services/context_orchestrator.py`에서 `_fallback_findings_from_normalized` / `_fallback_paths_from_findings`를 제거하고, 그래프 미반환 시에는 `paths=[]`, `facts.findings=[]`, `bundle["triples"]="데이터 없음"`을 명시적으로 설정하되 `fallback_reason` 플래그를 추가해 클라이언트가 degrade 여부를 파악할 수 있게 한다.
+3. **파이프라인 소비자 정비** – `/pipeline/analyze`(`grounded-ai/api/routers/pipeline.py`)에서 `graph_context.summary`, `graph_context.paths`, `graph_context.facts`, `debug.context_*`가 모두 `ContextResult` 하나에서 온 값을 사용하도록 보장하고, fallback 시 메시지(`"No path generated"` 등)를 paths/facts와 동일 조건으로 표시한다.
+4. **검증 및 히스토리 로깅** – `DebugPayloadBuilder`에 `context_consistency` 필드를 추가해 `facts.findings`와 `context_findings_head`가 일치하는지 기록하고, mismatch가 감지되면 Spec-03 준수 실패로 간주하여 오류 리스트에 `{"stage":"context","msg":"facts_paths_mismatch"}`를 추가한다.
+5. **테스트/CI** – `tests/test_context_orchestrator.py`를 보강하여 (a) 그래프가 경로를 반환할 때 facts/paths/summary가 동일 근거를 공유하는지, (b) 그래프가 빈 결과를 줄 때 fallback이 `paths=[]`와 명시적 degrade 플래그를 세팅하는지 확인하고, GitHub Actions에서 항상 실행하도록 한다.
+
+---
+
 ### 🔹 검증 기준
 
 | 항목                                     | 기대값                 | 검증 방법           |
@@ -216,6 +235,13 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 | triples_summary 내부 `No path generated` | 존재 시 paths_len == 0 | 일관성 체크 pytest   |
 
 ---
+
+### 🔹 진행 상황 요약 (2025-11-13)
+
+- `GraphContextBuilder.build_context()`가 `GraphContextResult`를 반환하도록 개편되었고, `/pipeline/analyze`는 더 이상 `_fallback_paths_from_findings` 같은 in-memory 경로를 삽입하지 않는다. 경로가 없을 때는 단순히 `paths=[]`, `triples`에 “No path generated (0/k)”를 표기하며, `context_consistency=true`가 함께 기록된다.
+- `ContextOrchestrator`는 그래프가 빈 결과를 줄 경우 `no_graph_evidence`와 `fallback_reason=\"no_graph_paths\"`만 세팅하고, facts/summary에는 원본 그래프 결과만 유지한다.
+- `DebugPayloadBuilder`는 `context_consistency`와 `context_consistency_reason`을 기록하고, 파이프라인은 paths vs. triples 불일치 감지 시 `errors` 배열에 `{"stage":"context","msg":"facts_paths_mismatch"}`를 추가한다.
+- 남은 항목: `build_context()`/`ContextResult`를 활용하는 pytest 보강(`tests/test_context_orchestrator.py`, `tests/test_paths_and_analyze.py`)이 일부 적용되었으나, CI에서 강제 실행되도록 워크플로우 업데이트와 더 다양한 경로/summary 일관성 케이스를 추가할 필요가 있다.
 
 ## ✅ [Spec-04] 슬롯 리밸런싱 개선 (Slot Rebalancing Fix)
 

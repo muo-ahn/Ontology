@@ -22,12 +22,12 @@ from models.pipeline import AnalyzeResp
 from services.context_pack import GraphContextBuilder
 from services.context_orchestrator import ContextLimits, ContextOrchestrator
 from services.debug_payload import DebugPayloadBuilder
-from services.dummy_registry import DummyFindingRegistry
+from services.dummy_registry import DummyFindingRegistry, DummyImageRegistry
 from services.dedup import dedup_findings
 from services.finding_validation import FindingValidationError, validate_findings_payload
 from services.finding_verifier import FindingVerifier
 from services.graph_repo import GraphRepo
-from services.fallback_meta import FallbackMeta, FallbackMetaError, coerce_fallback_meta
+from services.fallback_meta import FallbackMeta, FallbackMetaError, coerce_fallback_meta, FallbackMetaGuard
 from services.image_identity import ImageIdentityError, identify_image
 from services.llm_runner import LLMRunner
 from services.normalizer import normalize_from_vlm
@@ -57,6 +57,17 @@ def _replace_image_tokens(text: Optional[str], image_id: Optional[str]) -> Optio
     for token in ["(IMAGE_ID)", "IMAGE_ID"]:
         result = result.replace(token, image_id)
     return result
+
+
+def _detect_context_mismatch(paths: List[Dict[str, Any]], triples_text: Optional[str]) -> tuple[bool, Optional[str]]:
+    has_paths = bool(paths)
+    text = (triples_text or "").lower()
+    mentions_no_path = "no path generated" in text
+    if has_paths and mentions_no_path:
+        return True, "paths_present_but_marked_missing"
+    if not has_paths and not mentions_no_path:
+        return True, "paths_missing_without_notice"
+    return False, None
 
 
 class AnalyzeReq(BaseModel):
@@ -690,6 +701,10 @@ async def analyze(
         graph_paths_strength = context_result.graph_paths_strength
         no_graph_evidence = context_result.no_graph_evidence and len(finding_ids) == 0
         has_paths = len(paths_list) > 0
+        triples_text = context_bundle.get("triples") if isinstance(context_bundle, dict) else None
+        context_mismatch, mismatch_reason = _detect_context_mismatch(paths_list, triples_text)
+        if context_mismatch:
+            errors.append({"stage": "context", "msg": "facts_paths_mismatch"})
 
         if isinstance(context_bundle, dict):
             context_bundle.setdefault("finding_source", finding_source)
@@ -708,6 +723,8 @@ async def analyze(
             similarity_threshold=similarity_threshold,
             similarity_candidates_considered=similarity_candidates_debug,
             graph_degraded=graph_degraded,
+            context_consistency=not context_mismatch,
+            context_consistency_reason=mismatch_reason,
         )
 
         results: Dict[str, Dict[str, Any]] = {}

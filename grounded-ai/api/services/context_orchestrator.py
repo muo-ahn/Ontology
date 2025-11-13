@@ -35,6 +35,7 @@ class ContextResult:
     graph_paths_strength: float
     no_graph_evidence: bool
     fallback_used: bool
+    fallback_reason: Optional[str]
 
 
 class ContextOrchestrator:
@@ -51,7 +52,7 @@ class ContextOrchestrator:
         graph_degraded: bool,
         limits: ContextLimits,
     ) -> ContextResult:
-        bundle = self._builder.build_bundle(
+        context_data = self._builder.build_context(
             image_id=image_id,
             k=limits.k_paths,
             max_chars=limits.max_chars,
@@ -59,36 +60,21 @@ class ContextOrchestrator:
             beta_report=limits.beta_report,
             k_slots=limits.slot_overrides,
         )
-
-        facts = _safe_dict(bundle.get("facts"))
+        bundle = context_data.to_bundle()
+        facts = _safe_dict(context_data.facts)
         findings_list = _extract_findings(facts)
-
-        fallback_used = False
-        if graph_degraded and not findings_list and normalized_findings:
-            findings_list = _fallback_findings_from_normalized(image_id, normalized_findings)
-            if findings_list:
-                fallback_used = True
-                facts = dict(facts or {})
-                facts.setdefault("image_id", image_id)
-                facts["findings"] = findings_list
-                bundle["facts"] = facts
-
-        raw_paths = bundle.get("paths")
-        paths_list = raw_paths if isinstance(raw_paths, list) else []
+        paths_list = list(context_data.paths or [])
         ctx_paths_total = _count_triples(paths_list)
-
-        if not paths_list and normalized_findings:
-            fallback_paths = _fallback_paths_from_findings(image_id, normalized_findings, limits.k_paths or 1)
-            if fallback_paths:
-                fallback_used = True
-                paths_list = fallback_paths
-                bundle["paths"] = fallback_paths
-                ctx_paths_total = _count_triples(fallback_paths)
-
         _ensure_findings_slot_allocation(bundle, len(paths_list))
 
         graph_paths_strength = _graph_paths_strength(len(paths_list), ctx_paths_total)
         no_graph_evidence = len(paths_list) == 0
+        fallback_reason: Optional[str] = None
+        if no_graph_evidence:
+            fallback_reason = "no_graph_paths"
+        elif graph_degraded:
+            fallback_reason = "graph_degraded"
+        fallback_used = fallback_reason is not None
 
         return ContextResult(
             bundle=bundle,
@@ -99,6 +85,7 @@ class ContextOrchestrator:
             graph_paths_strength=graph_paths_strength,
             no_graph_evidence=no_graph_evidence,
             fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
         )
 
 
@@ -111,66 +98,6 @@ def _extract_findings(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(findings, list):
         return list(findings)
     return []
-
-
-def _fallback_findings_from_normalized(
-    image_id: str,
-    normalized_findings: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    fallback_findings: List[Dict[str, Any]] = []
-    for idx, finding in enumerate(normalized_findings, start=1):
-        if not isinstance(finding, dict):
-            continue
-        fid = str(finding.get("id") or finding.get("finding_id") or f"FALLBACK_{idx}")
-        fallback_findings.append({
-            "id": fid,
-            "type": finding.get("type"),
-            "location": finding.get("location"),
-            "size_cm": finding.get("size_cm"),
-            "conf": finding.get("conf"),
-            "image_id": image_id,
-        })
-    return fallback_findings
-
-
-def _fallback_paths_from_findings(
-    image_id: Optional[str],
-    findings: List[Dict[str, Any]],
-    limit: int,
-) -> List[Dict[str, Any]]:
-    if not findings or limit <= 0:
-        return []
-    budget = max(int(limit), 1)
-    token = (image_id or "UNKNOWN").strip() or "UNKNOWN"
-    fallback_paths: List[Dict[str, Any]] = []
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        fid = str(
-            finding.get("id")
-            or finding.get("finding_id")
-            or finding.get("uid")
-            or f"FALLBACK_{len(fallback_paths) + 1}"
-        )
-        label = str(finding.get("type") or finding.get("label") or f"Finding[{fid}]")
-        location = str(finding.get("location") or "").strip()
-        triples = [f"Image[{token}] -HAS_FINDING-> Finding[{fid}]"]
-        if location:
-            triples.append(f"Finding[{fid}] -LOCATED_IN-> Anatomy[{location}]")
-        score_raw = finding.get("conf")
-        try:
-            score = float(score_raw) if score_raw is not None else 0.5
-        except (TypeError, ValueError):
-            score = 0.5
-        fallback_paths.append({
-            "slot": "findings",
-            "label": label,
-            "triples": triples,
-            "score": score,
-        })
-        if len(fallback_paths) >= budget:
-            break
-    return fallback_paths
 
 
 def _graph_paths_strength(path_count: int, triple_total: int) -> float:

@@ -5,11 +5,51 @@ from typing import Any, Dict, List
 import pytest
 
 from services.context_orchestrator import ContextLimits, ContextOrchestrator
+from services.context_pack import GraphContextResult
 
 
 class _FakeBuilder:
     def __init__(self, bundle: Dict[str, Any]) -> None:
         self._bundle = bundle
+
+    def _prepare_bundle(self, image_id: str) -> Dict[str, Any]:
+        payload = dict(self._bundle)
+        payload.setdefault("summary", ["[EDGE SUMMARY]", "데이터 없음"])
+        payload.setdefault("summary_rows", [])
+        facts = dict(payload.get("facts") or {"image_id": image_id, "findings": []})
+        facts.setdefault("image_id", image_id)
+        facts.setdefault("findings", [])
+        payload["facts"] = facts
+        payload.setdefault("paths", [])
+        payload.setdefault("triples", "\n".join(payload["summary"] + ["[EVIDENCE PATHS (Top-k)]", "No path generated"]))
+        payload.setdefault("slot_limits", {"findings": 1, "reports": 0, "similarity": 0})
+        slot_limits = payload["slot_limits"]
+        payload.setdefault(
+            "slot_meta",
+            {"allocated_total": sum(slot_limits.values()), "slot_source": "auto", "requested_k": 1, "applied_k": 1, "requested_overrides": {}},
+        )
+        return payload
+
+    def build_context(
+        self,
+        *,
+        image_id: str,
+        k: int,
+        max_chars: int,
+        alpha_finding: float | None,
+        beta_report: float | None,
+        k_slots: Dict[str, int] | None,
+    ) -> GraphContextResult:
+        payload = self._prepare_bundle(image_id)
+        return GraphContextResult(
+            summary=list(payload["summary"]),
+            summary_rows=list(payload.get("summary_rows", [])),
+            paths=list(payload.get("paths", [])),
+            facts=dict(payload["facts"]),
+            triples_text=str(payload.get("triples", "")),
+            slot_limits=dict(payload.get("slot_limits", {})),
+            slot_meta=dict(payload.get("slot_meta", {})),
+        )
 
     def build_bundle(
         self,
@@ -21,13 +61,14 @@ class _FakeBuilder:
         beta_report: float | None,
         k_slots: Dict[str, int] | None,
     ) -> Dict[str, Any]:
-        payload = dict(self._bundle)
-        payload.setdefault("slot_limits", {"findings": 1, "reports": 0, "similarity": 0})
-        payload.setdefault("slot_meta", {"allocated_total": sum(payload["slot_limits"].values()), "slot_source": "auto"})
-        payload.setdefault("triples", "")
-        payload.setdefault("summary", ["[EDGE SUMMARY]", "데이터 없음"])
-        payload.setdefault("facts", {"image_id": image_id, "findings": payload.get("facts", {}).get("findings", [])})
-        return payload
+        return self.build_context(
+            image_id=image_id,
+            k=k,
+            max_chars=max_chars,
+            alpha_finding=alpha_finding,
+            beta_report=beta_report,
+            k_slots=k_slots,
+        ).to_bundle()
 
 
 def _context(
@@ -71,7 +112,7 @@ def test_context_orchestrator_keeps_existing_paths_and_facts() -> None:
     assert not result.no_graph_evidence
 
 
-def test_context_orchestrator_fills_missing_facts_when_graph_degraded() -> None:
+def test_context_orchestrator_reports_no_graph_evidence_for_empty_bundle() -> None:
     bundle = _context(findings=[], paths=[], graph_degraded=True)
     orchestrator = ContextOrchestrator(_FakeBuilder(bundle))
     normalized = [{"id": "F2", "type": "nodule", "location": "lung", "conf": 0.7}]
@@ -81,13 +122,14 @@ def test_context_orchestrator_fills_missing_facts_when_graph_degraded() -> None:
         graph_degraded=True,
         limits=_limits(),
     )
+    assert result.no_graph_evidence
     assert result.fallback_used
-    assert result.findings[0]["id"] == "F2"
-    assert result.paths, "fallback paths should be synthesised"
-    assert result.bundle["facts"]["findings"][0]["image_id"] == "IMG123"
+    assert result.fallback_reason == "no_graph_paths"
+    assert result.findings == []
+    assert result.paths == []
 
 
-def test_context_orchestrator_generates_paths_when_none_exist() -> None:
+def test_context_orchestrator_does_not_synthesise_paths() -> None:
     bundle = _context(findings=[{"id": "F1", "type": "mass"}], paths=[])
     orchestrator = ContextOrchestrator(_FakeBuilder(bundle))
     result = orchestrator.build(
@@ -96,10 +138,10 @@ def test_context_orchestrator_generates_paths_when_none_exist() -> None:
         graph_degraded=False,
         limits=_limits(k_paths=1),
     )
-    assert result.paths, "should fallback to synthesized paths"
-    assert result.paths[0]["slot"] == "findings"
-    assert result.graph_paths_strength > 0
-    assert not result.no_graph_evidence
+    assert not result.paths
+    assert result.no_graph_evidence
+    assert result.fallback_used
+    assert result.fallback_reason == "no_graph_paths"
 
 
 def test_context_orchestrator_marks_no_graph_evidence_when_everything_empty() -> None:

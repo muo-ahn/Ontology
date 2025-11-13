@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -389,6 +390,28 @@ def _augment_summary_rows(
     return ordered
 
 
+@dataclass(slots=True)
+class GraphContextResult:
+    summary: List[str]
+    summary_rows: List[Dict[str, Any]]
+    paths: List[Dict[str, Any]]
+    facts: Dict[str, Any]
+    triples_text: str
+    slot_limits: Dict[str, int]
+    slot_meta: Dict[str, Any]
+
+    def to_bundle(self) -> Dict[str, Any]:
+        return {
+            "summary": list(self.summary),
+            "summary_rows": list(self.summary_rows),
+            "paths": list(self.paths),
+            "facts": dict(self.facts),
+            "triples": self.triples_text,
+            "slot_limits": dict(self.slot_limits),
+            "slot_meta": dict(self.slot_meta),
+        }
+
+
 class GraphContextBuilder:
     """Fetches and formats graph-derived context for LLM prompts."""
 
@@ -415,12 +438,7 @@ class GraphContextBuilder:
         if mode_normalised not in {"triples", "json"}:
             raise ValueError("mode must be 'triples' or 'json'")
 
-        if mode_normalised == "json":
-            bundle = self._repo.query_bundle(image_id)
-            facts = ContextFacts(**bundle.get("facts", {"image_id": image_id, "findings": []}))
-            return json_dumps_safe(facts.model_dump(mode="python"))
-
-        bundle = self.build_bundle(
+        context = self.build_context(
             image_id=image_id,
             k=k,
             max_chars=max_chars,
@@ -428,9 +446,11 @@ class GraphContextBuilder:
             beta_report=beta_report,
             k_slots=k_slots,
         )
-        return bundle["triples"]
+        if mode_normalised == "json":
+            return json_dumps_safe(context.facts)
+        return context.triples_text
 
-    def build_bundle(
+    def build_context(
         self,
         image_id: str,
         *,
@@ -440,7 +460,7 @@ class GraphContextBuilder:
         alpha_finding: Optional[float] = None,
         beta_report: Optional[float] = None,
         k_slots: Optional[Dict[str, int]] = None,
-    ) -> Dict[str, Any]:
+    ) -> "GraphContextResult":
         if k < 0:
             raise ValueError("k must be >= 0")
 
@@ -501,10 +521,6 @@ class GraphContextBuilder:
                 k_slots=slot_limits,
             )
             paths_rows = _dedupe_path_rows(raw_paths)
-            if not paths_rows:
-                fallback_rows = _build_fallback_path_rows(image_id, facts_payload, slot_limits)
-                if fallback_rows:
-                    paths_rows = fallback_rows
 
             total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
             desired_paths = total_budget if current_k <= 0 else min(current_k, total_budget or current_k)
@@ -568,15 +584,39 @@ class GraphContextBuilder:
         if slot_overrides and slot_overrides_clean != slot_overrides:
             slot_meta["requested_overrides_raw"] = slot_overrides
 
-        return {
-            "summary": summary_lines,
-            "paths": paths_payload,
-            "facts": facts_payload,
-            "triples": triples_text,
-            "slot_limits": final_slot_limits,
-            "slot_meta": slot_meta,
-            "summary_rows": final_summary_rows,
-        }
+        return GraphContextResult(
+            summary=summary_lines,
+            summary_rows=final_summary_rows,
+            paths=paths_payload,
+            facts=facts_payload,
+            triples_text=triples_text,
+            slot_limits=final_slot_limits,
+            slot_meta=slot_meta,
+        )
+
+    def build_bundle(
+        self,
+        image_id: str,
+        *,
+        k: int = 2,
+        max_chars: int = 1800,
+        hard_trim: bool = True,
+        alpha_finding: Optional[float] = None,
+        beta_report: Optional[float] = None,
+        k_slots: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Backwards-compatible wrapper returning the context dict."""
+
+        context = self.build_context(
+            image_id=image_id,
+            k=k,
+            max_chars=max_chars,
+            hard_trim=hard_trim,
+            alpha_finding=alpha_finding,
+            beta_report=beta_report,
+            k_slots=k_slots,
+        )
+        return context.to_bundle()
 
     def _format_evidence_section(
         self,
@@ -727,6 +767,7 @@ class ContextPackBuilder:
 __all__ = [
     "json_dumps_safe",
     "GraphContextBuilder",
+    "GraphContextResult",
     "ContextPack",
     "ContextPackBuilder",
     "ContextFacts",

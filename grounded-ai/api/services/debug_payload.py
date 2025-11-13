@@ -123,6 +123,8 @@ class DebugPayloadBuilder:
         similarity_threshold: Optional[float],
         similarity_candidates_considered: int,
         graph_degraded: bool,
+        context_consistency: Optional[bool] = None,
+        context_consistency_reason: Optional[str] = None,
     ) -> None:
         if not self.enabled:
             return
@@ -143,6 +145,10 @@ class DebugPayloadBuilder:
         })
         if graph_degraded:
             self._payload["graph_degraded"] = True
+        if context_consistency is not None:
+            self._payload["context_consistency"] = context_consistency
+            if not context_consistency and context_consistency_reason:
+                self._payload["context_consistency_reason"] = context_consistency_reason
 
     def record_consensus(self, consensus: Dict[str, Any]) -> None:
         if not self.enabled:
