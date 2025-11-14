@@ -40,6 +40,15 @@
 
 ---
 
+## 진행 현황 (2025-11-16)
+
+- **Spec-D (그래프 기반 합의)**: `consensus.vote_summary`, `agreement_components`, `mode_weights` 를 응답에 노출하고, 2/3 미만 합의 시 `confidence=low`, `notes` 에 `limited mode agreement` 를 자동 기록한다. `graph_paths_strength` 가 0이면 V/VL이 즉시 `degraded="graph_mismatch"` 로 다운그레이드된다.
+- **Spec-E (경로 증거 복원)**: `GraphRepo.query_paths()` 가 Neo4j 의 `HAS_FINDING / LOCATED_IN / SIMILAR_TO` 경로를 multi-hop 으로 수집하고, `GraphContextBuilder` 는 경로가 없을 때만 facts 기반 fallback 을 합성한다. `graph_context.paths` 와 `debug.context_paths_head` 에 실제 triple 이 노출되며 `context_fallback_used=false` 를 유지한다.
+- **디버그 스크립트 검증**: `./scripts/vision_pipeline_debug.sh … '{"force_dummy_fallback": true}'` 로 IMG_001 · IMG_003 · IMG201 케이스를 실행하면 `graph evidence boosted consensus (paths_signal=0.23)` 메모, `findings slot rebalanced from 1 to 2` 노트, 그리고 Neo4j 경로를 확인할 수 있다.
+- **테스트 & 툴링**: Spec-D/E 회귀는 `pytest tests/test_normalizer.py tests/test_debug_payload.py tests/test_context_orchestrator.py tests/test_paths_and_analyze.py tests/test_consensus.py tests/test_consensus_snapshot.py` 및 `PYTHONPATH=grounded-ai/api python scripts/check_label_drift.py` 로 커버한다.
+
+---
+
 ## System Diagram
 
 ```
