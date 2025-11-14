@@ -699,7 +699,10 @@ async def analyze(
         paths_list = context_result.paths
         ctx_paths_total = context_result.path_triple_total
         graph_paths_strength = context_result.graph_paths_strength
-        no_graph_evidence = context_result.no_graph_evidence and len(finding_ids) == 0
+        context_no_graph_evidence = context_result.no_graph_evidence
+        context_fallback_reason = context_result.fallback_reason
+        context_fallback_used = context_result.fallback_used
+        no_graph_evidence = context_no_graph_evidence and len(finding_ids) == 0
         has_paths = len(paths_list) > 0
         triples_text = context_bundle.get("triples") if isinstance(context_bundle, dict) else None
         context_mismatch, mismatch_reason = _detect_context_mismatch(paths_list, triples_text)
@@ -707,6 +710,9 @@ async def analyze(
             errors.append({"stage": "context", "msg": "facts_paths_mismatch"})
 
         if isinstance(context_bundle, dict):
+            context_bundle["fallback_reason"] = context_fallback_reason
+            context_bundle["fallback_used"] = context_fallback_used
+            context_bundle["no_graph_evidence"] = context_no_graph_evidence
             context_bundle.setdefault("finding_source", finding_source)
             context_bundle.setdefault("seeded_finding_ids", list(seeded_finding_ids))
             context_bundle.setdefault("finding_fallback", fallback_guard.snapshot("context_bundle"))
@@ -725,6 +731,9 @@ async def analyze(
             graph_degraded=graph_degraded,
             context_consistency=not context_mismatch,
             context_consistency_reason=mismatch_reason,
+            fallback_used=context_fallback_used,
+            fallback_reason=context_fallback_reason,
+            no_graph_evidence=context_no_graph_evidence,
         )
 
         results: Dict[str, Dict[str, Any]] = {}
@@ -959,6 +968,9 @@ async def analyze(
         evaluation_payload["seeded_finding_ids"] = seeded_finding_ids
         evaluation_payload["finding_fallback"] = fallback_guard.snapshot("evaluation_payload")
         evaluation_payload["finding_provenance"] = dict(provenance_payload)
+        evaluation_payload["context_fallback_reason"] = context_fallback_reason
+        evaluation_payload["context_fallback_used"] = context_fallback_used
+        evaluation_payload["context_no_graph_evidence"] = context_no_graph_evidence
 
         debug_builder.record_evaluation(evaluation_payload)
         if debug_enabled:

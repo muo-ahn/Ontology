@@ -72,6 +72,9 @@ class DummyEvaluation(BaseModel):
     seeded_finding_ids: List[str] = Field(default_factory=list)
     finding_fallback: Dict[str, Any] = Field(default_factory=dict)
     finding_provenance: Dict[str, Any] = Field(default_factory=dict)
+    context_fallback_reason: Optional[str] = None
+    context_fallback_used: Optional[bool] = None
+    context_no_graph_evidence: Optional[bool] = None
 
 
 class AnalyzeResp(BaseModel):

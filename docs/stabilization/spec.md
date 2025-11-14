@@ -243,16 +243,6 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 - `DebugPayloadBuilder`는 `context_consistency`와 `context_consistency_reason`을 기록하고, 파이프라인은 paths vs. triples 불일치 감지 시 `errors` 배열에 `{"stage":"context","msg":"facts_paths_mismatch"}`를 추가한다.
 - 남은 항목: `build_context()`/`ContextResult`를 활용하는 pytest 보강(`tests/test_context_orchestrator.py`, `tests/test_paths_and_analyze.py`)이 일부 적용되었으나, CI에서 강제 실행되도록 워크플로우 업데이트와 더 다양한 경로/summary 일관성 케이스를 추가할 필요가 있다.
 
-### 🔹 최신 디버그 스냅샷 (vision_pipeline_debug.sh)
-
-- 명령: `./scripts/vision_pipeline_debug.sh "/data/medical_dummy/images/api_test_data/Acute-fatty-liver-of-pregnancy-non-contrast-computed-tomography-Non-contrast-computed.png" '{"force_dummy_fallback": true}'`
-- 정규화: `DummyImageRegistry`가 입력을 `IMG_001 (CT)`로 매핑했고 `storage_uri="/mnt/data/medical_dummy/images/img_001.png"`을 재사용했다.
-- 폴백 현황: `finding_fallback.used/forced/force=true`가 `normalized_payload → evaluation_payload` 전 구간에서 유지되며, 히스토리 9단계 모두가 Spec-01/02 보강 이후 일관된 메타를 남긴다.
-- 그래프 맥락: `context_paths_len=0`, `graph_paths_strength=0.0`, `context_slot_limits={"findings":1,"reports":1,"similarity":0}`로 보고되며 `paths=[]` 그대로 노출된다. “No path generated (0/k)” 메시지가 summary/triples와 동기화되어 Spec-03 요구사항을 충족한다.
-- 유사도 동기화: `similarity_edges_created=9`, 후보 26건 중 9건이 1.0 스코어로 채택되어 fallback 시에도 seed 그래프와의 연결성이 유지됨을 확인했다.
-- 합의부: `consensus.status="disagree"`, `agreement_score=0.165`, `supporting_modes=["VGL"]`, `disagreed_modes=["V","VL"]`, `confidence="low"`로 표기되며, `presented_text`가 “낮은 확신:” 접두어를 자동 부여한다.
-- 테스트 영향: 동일 시나리오에서도 `tests/test_paths_and_analyze.py` 기대치가 여전히 “fallback path ≥1” 기준에 묶여 있어 실패한다. Spec-03 준수 검증을 위해 `paths=[]`·저신뢰 합의·upsert 검증 실패 경로를 pytest/CI에 반영하는 작업이 남아 있다.
-
 ## ✅ [Spec-04] 슬롯 리밸런싱 개선 (Slot Rebalancing Fix)
 
 ### 🔹 목적
