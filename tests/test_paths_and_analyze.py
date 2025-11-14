@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from services.graph_repo import GraphRepo
 from services.dummy_registry import LookupResult
-from services.context_pack import GraphContextBuilder as RealGraphContextBuilder
+from services.context_pack import GraphContextBuilder as RealGraphContextBuilder, GraphContextResult
 from routers import pipeline as pipeline_module
 
 
@@ -57,6 +57,7 @@ class _PipelineHarness:
         paths_by_slot: Dict[str, List[Dict[str, Any]]],
         summary_rows: Optional[List[Dict[str, Any]]] = None,
         facts: Optional[Dict[str, Any]] = None,
+        force_empty_upsert_ids: bool = False,
     ) -> None:
         self.lookup = lookup
         self.paths_by_slot: Dict[str, List[Dict[str, Any]]] = {
@@ -67,6 +68,7 @@ class _PipelineHarness:
         self.instances: List[object] = []
         self.slot_requests: List[Dict[str, int]] = []
         self.storage_records: Dict[str, set[str]] = {}
+        self.force_empty_upsert_ids = force_empty_upsert_ids
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         harness = self
@@ -74,6 +76,7 @@ class _PipelineHarness:
         class StubGraphRepo:
             def __init__(self) -> None:
                 self._closed = False
+                self._stored_findings: Dict[str, List[str]] = {}
 
             @classmethod
             def from_env(cls) -> "StubGraphRepo":  # type: ignore[override]
@@ -88,7 +91,22 @@ class _PipelineHarness:
                 bucket = harness.storage_records.setdefault(image_id, set())
                 if storage_uri:
                     bucket.add(str(storage_uri))
-                return {"image_id": image_id, "finding_ids": []}
+                stored = [str((finding or {}).get("id") or f"MOCK_{idx}") for idx, finding in enumerate(payload.get("findings") or [])]
+                if harness.force_empty_upsert_ids:
+                    stored = []
+                self._stored_findings[image_id] = stored
+                return {"image_id": image_id, "finding_ids": stored}
+
+            def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+                return list(self._stored_findings.get(image_id, []))
+
+            def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+                data = deepcopy(payload)
+                image = dict(data.get("image") or {})
+                image.setdefault("image_id", harness.lookup.image_id)
+                data["image"] = image
+                data.setdefault("case_id", f"CASE_{harness.lookup.image_id}")
+                return data
 
             def query_bundle(self, image_id: str) -> Dict[str, Any]:
                 bundle_facts = dict(harness.facts)
@@ -166,6 +184,7 @@ def _upsert_reference_case() -> None:
     try:
         repo.upsert_case(
             {
+                "case_id": "CASE_US001",
                 "image": {
                     "image_id": "US001",
                     "path": "/data/dummy/US001.png",
@@ -191,6 +210,7 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
     class FakeGraphRepo:
         def __init__(self) -> None:
             self._closed = False
+            self._stored_findings: Dict[str, List[str]] = {}
 
         @classmethod
         def from_env(cls) -> "FakeGraphRepo":
@@ -206,13 +226,27 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
                 if not fid:
                     fid = f"MOCK_F_{idx}"
                 finding_ids.append(str(fid))
+            self._stored_findings[image_id] = list(finding_ids)
             return {"image_id": image_id, "finding_ids": finding_ids}
+
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            data = deepcopy(payload)
+            image = dict(data.get("image") or {})
+            image.setdefault("image_id", "FAKE_IMG")
+            data["image"] = image
+            data.setdefault("case_id", "FAKE_CASE")
+            return data
 
         def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
             return []
 
         def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
             return 0
+
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            if expected_ids is not None:
+                return list(expected_ids)
+            return list(self._stored_findings.get(image_id, []))
 
         def close(self) -> None:
             self._closed = True
@@ -221,14 +255,28 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
         def __init__(self, repo: FakeGraphRepo) -> None:  # pragma: no cover - simple container
             self._repo = repo
 
-        def build_bundle(self, **_: Any) -> Dict[str, Any]:
-            return {
-                "summary": [],
-                "facts": {"findings": []},
-                "paths": [],
-                "slot_limits": {"findings": 0, "reports": 0, "similarity": 0},
-                "triples": "",
-            }
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float],
+            beta_report: Optional[float],
+            k_slots: Optional[Dict[str, int]],
+        ) -> GraphContextResult:
+            return GraphContextResult(
+                summary=[],
+                summary_rows=[],
+                paths=[],
+                facts={"image_id": image_id, "findings": []},
+                triples_text="",
+                slot_limits={"findings": 0, "reports": 0, "similarity": 0},
+                slot_meta={"requested_k": k, "applied_k": k, "slot_source": "auto", "requested_overrides": {}, "allocated_total": 0},
+            )
+
+        def build_bundle(self, **kwargs: Any) -> Dict[str, Any]:
+            return self.build_context(**kwargs).to_bundle()
 
         def close(self) -> None:
             return None
@@ -285,6 +333,7 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
     class FakeGraphRepo:
         def __init__(self) -> None:
             self._closed = False
+            self._stored_findings: Dict[str, List[str]] = {}
 
         @classmethod
         def from_env(cls) -> "FakeGraphRepo":
@@ -297,13 +346,27 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
             finding_ids = [
                 str(finding.get("id") or f"MOCK_F_{idx}") for idx, finding in enumerate(findings)
             ]
+            self._stored_findings[image_id] = list(finding_ids)
             return {"image_id": image_id, "finding_ids": finding_ids}
+
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            data = deepcopy(payload)
+            image = dict(data.get("image") or {})
+            image.setdefault("image_id", "FAKE_IMG")
+            data["image"] = image
+            data.setdefault("case_id", "FAKE_CASE")
+            return data
 
         def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
             return []
 
         def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
             return 0
+
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            if expected_ids is not None:
+                return list(expected_ids)
+            return list(self._stored_findings.get(image_id, []))
 
         def close(self) -> None:
             self._closed = True
@@ -312,30 +375,47 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
         def __init__(self, repo: FakeGraphRepo) -> None:
             self._repo = repo
 
-        def build_bundle(self, **_: Any) -> Dict[str, Any]:
-            return {
-                "summary": ["[EDGE SUMMARY]", "HAS_FINDING: cnt=1, avg_conf=0.9"],
-                "facts": {
-                    "image_id": "US001",
-                    "findings": [
-                        {
-                            "id": "F201",
-                            "type": "mass",
-                            "location": "liver",
-                            "conf": 0.88,
-                        }
-                    ],
-                },
-                "paths": [
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float],
+            beta_report: Optional[float],
+            k_slots: Optional[Dict[str, int]],
+        ) -> GraphContextResult:
+            summary_lines = ["[EDGE SUMMARY]", "HAS_FINDING: cnt=1, avg_conf=0.9"]
+            paths = [
+                {
+                    "label": "Seed Finding",
+                    "triples": ["Image[US001] -HAS_FINDING-> Finding[F201]"],
+                    "slot": "findings",
+                }
+            ]
+            facts = {
+                "image_id": "US001",
+                "findings": [
                     {
-                        "label": "Seed Finding",
-                        "triples": ["Image[US001] -HAS_FINDING-> Finding[F201]"],
-                        "slot": "findings",
+                        "id": "F201",
+                        "type": "mass",
+                        "location": "liver",
+                        "conf": 0.88,
                     }
                 ],
-                "slot_limits": {"findings": 2, "reports": 0, "similarity": 0},
-                "triples": "Image[US001] -HAS_FINDING-> Finding[F201]",
             }
+            return GraphContextResult(
+                summary=summary_lines,
+                summary_rows=[{"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.9}],
+                paths=paths,
+                facts=facts,
+                triples_text="Image[US001] -HAS_FINDING-> Finding[F201]",
+                slot_limits={"findings": 2, "reports": 0, "similarity": 0},
+                slot_meta={"requested_k": k, "applied_k": k, "slot_source": "auto", "requested_overrides": {}, "allocated_total": 2},
+            )
+
+        def build_bundle(self, **kwargs: Any) -> Dict[str, Any]:
+            return self.build_context(**kwargs).to_bundle()
 
         def close(self) -> None:
             return None
@@ -427,6 +507,7 @@ def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
     class RecordingGraphRepo:
         def __init__(self) -> None:
             self.storage_by_id: Dict[str, set[str]] = {}
+            self.findings_by_id: Dict[str, List[str]] = {}
 
         @classmethod
         def from_env(cls) -> "RecordingGraphRepo":  # type: ignore[override]
@@ -434,15 +515,31 @@ def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
             graph_repo_instances.append(instance)
             return instance
 
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            data = deepcopy(payload)
+            image = dict(data.get("image") or {})
+            image.setdefault("image_id", canonical_id)
+            data["image"] = image
+            data.setdefault("case_id", f"CASE_{canonical_id}")
+            return data
+
         def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-            image = payload.get("image") or {}
+            prepared = self.prepare_upsert_parameters(payload)
+            image = prepared.get("image") or {}
             image_id = image.get("image_id")
             storage_uri = image.get("storage_uri")
             if image_id:
                 bucket = self.storage_by_id.setdefault(str(image_id), set())
                 if storage_uri:
                     bucket.add(str(storage_uri))
-            return {"image_id": image_id, "finding_ids": []}
+                findings_payload = prepared.get("findings") or []
+                finding_ids = [
+                    str((finding or {}).get("id") or f"REC_F_{idx}") for idx, finding in enumerate(findings_payload)
+                ]
+                self.findings_by_id[str(image_id)] = finding_ids
+            else:
+                finding_ids = []
+            return {"image_id": image_id, "finding_ids": finding_ids}
 
         def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
             return []
@@ -450,12 +547,43 @@ def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
         def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
             return 0
 
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(self.findings_by_id.get(str(image_id), []))
+
         def close(self) -> None:
             return None
 
     class RecordingContextBuilder:
         def __init__(self, repo: RecordingGraphRepo) -> None:
             self._repo = repo
+
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float] = None,
+            beta_report: Optional[float] = None,
+            k_slots: Optional[Dict[str, int]] = None,
+        ) -> GraphContextResult:
+            slot_limits = dict(k_slots or {"findings": k, "reports": 0, "similarity": 0})
+            slot_meta = {
+                "requested_k": k,
+                "applied_k": k,
+                "slot_source": "overrides" if k_slots else "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": sum(slot_limits.values()),
+            }
+            return GraphContextResult(
+                summary=["[EDGE SUMMARY]", "데이터 없음"],
+                summary_rows=[],
+                paths=[],
+                facts={"image_id": image_id, "findings": []},
+                triples_text="No path generated (0/k)",
+                slot_limits=slot_limits,
+                slot_meta=slot_meta,
+            )
 
         def build_bundle(
             self,
@@ -467,14 +595,14 @@ def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
             beta_report: Optional[float] = None,
             k_slots: Optional[Dict[str, int]] = None,
         ) -> Dict[str, Any]:
-            slot_limits = k_slots or {"findings": k, "reports": 0, "similarity": 0}
-            return {
-                "summary": [],
-                "facts": {"image_id": image_id, "findings": []},
-                "paths": [],
-                "slot_limits": slot_limits,
-                "triples": "",
-            }
+            return self.build_context(
+                image_id=image_id,
+                k=k,
+                max_chars=max_chars,
+                alpha_finding=alpha_finding,
+                beta_report=beta_report,
+                k_slots=k_slots,
+            ).to_bundle()
 
         def close(self) -> None:
             return None
@@ -636,7 +764,7 @@ def test_pipeline_slot_limits_keep_findings_when_summary_has_findings(
     assert slot_limits.get("findings", 0) >= 1
 
 
-def test_pipeline_builds_fallback_paths_when_graph_returns_none(
+def test_pipeline_reports_no_paths_when_graph_returns_none(
     pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     lookup = LookupResult(
@@ -673,12 +801,12 @@ def test_pipeline_builds_fallback_paths_when_graph_returns_none(
     assert response.status_code == 200, response.text
     payload = response.json()
     debug_blob = payload.get("debug", {})
-    assert debug_blob.get("context_paths_len", 0) >= 1
+    assert debug_blob.get("context_paths_len", 0) == 0
+    assert debug_blob.get("context_consistency") is True
     graph_paths = payload.get("graph_context", {}).get("paths", [])
-    assert graph_paths, "fallback builder failed to surface any evidence paths"
-    assert any("HAS_FINDING" in triple for triple in graph_paths[0].get("triples", []))
+    assert graph_paths == []
     triples_block = payload.get("graph_context", {}).get("triples", "")
-    assert "No path generated" not in triples_block
+    assert "No path generated" in triples_block
 
 
 def test_pipeline_backfills_paths_when_graph_returns_no_facts(
@@ -713,18 +841,17 @@ def test_pipeline_backfills_paths_when_graph_returns_no_facts(
     assert response.status_code == 200, response.text
     payload = response.json()
     debug_blob = payload.get("debug", {})
-    assert debug_blob.get("context_paths_len", 0) >= 1
+    assert debug_blob.get("context_paths_len", 0) == 0
     graph_context = payload.get("graph_context", {})
     paths = graph_context.get("paths", [])
-    assert paths, "fallback injection failed to add any evidence path"
-    assert any("HAS_FINDING" in triple for triple in paths[0].get("triples", []))
+    assert paths == []
     slot_limits = graph_context.get("slot_limits", {})
-    assert isinstance(slot_limits, dict) and slot_limits.get("findings", 0) >= 1
+    assert isinstance(slot_limits, dict) and slot_limits.get("findings", 0) == 0
     facts = graph_context.get("facts", {})
-    assert isinstance(facts.get("findings"), list) and facts["findings"], "facts should reflect fallback findings"
+    assert isinstance(facts.get("findings"), list) and not facts["findings"], "facts should remain empty when graph has none"
 
 
-def test_pipeline_marks_degraded_when_upsert_returns_no_ids(
+def test_pipeline_raises_error_when_upsert_returns_no_ids(
     pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     lookup = LookupResult(
@@ -738,6 +865,7 @@ def test_pipeline_marks_degraded_when_upsert_returns_no_ids(
         paths_by_slot={},
         summary_rows=[],
         facts={"image_id": "IMG999", "findings": []},
+        force_empty_upsert_ids=True,
     )
     harness.install(monkeypatch)
 
@@ -753,15 +881,14 @@ def test_pipeline_marks_degraded_when_upsert_returns_no_ids(
             "max_chars": 80,
         },
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 500
     payload = response.json()
-    assert payload.get("status") == "degraded"
-    assert "graph upsert failed" in (payload.get("notes") or "")
-    facts = payload.get("graph_context", {}).get("facts", {})
-    assert isinstance(facts.get("findings"), list) and len(facts["findings"]) > 0
-    evaluation = payload.get("evaluation", {})
-    assert evaluation.get("status") == "degraded"
-    assert "graph upsert failed" in (evaluation.get("notes") or "")
+    detail = payload.get("detail") or {}
+    assert detail.get("ok") is False
+    errors = detail.get("errors") or []
+    assert errors, "upsert mismatch error payload missing"
+    assert errors[0].get("stage") == "upsert"
+    assert errors[0].get("msg") == "finding_upsert_mismatch"
 
 
 def test_pipeline_provenance_metadata_aligns_across_sections(
@@ -889,8 +1016,11 @@ def ensure_dummy_c_seed() -> None:
     if shutil.which("cypher-shell") is None:
         pytest.skip("cypher-shell command not available", allow_module_level=True)
 
-    _load_seed_data()
-    _upsert_reference_case()
+    try:
+        _load_seed_data()
+        _upsert_reference_case()
+    except subprocess.CalledProcessError:
+        pytest.skip("cypher-shell invocation failed; skipping Neo4j-dependent tests", allow_module_level=True)
 
 
 @pytest.mark.usefixtures("ensure_dummy_c_seed")
@@ -969,6 +1099,119 @@ def pipeline_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
         async def generate(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
             return {"output": "ok", "latency_ms": 1}
+
+    lookup_stub = LookupResult(
+        image_id="US001",
+        storage_uri="/data/dummy/US001.png",
+        modality="US",
+        source="alias",
+    )
+
+    class FixtureGraphRepo:
+        def __init__(self) -> None:
+            self._closed = False
+            self._stored_findings: Dict[str, List[str]] = {}
+
+        @classmethod
+        def from_env(cls) -> "FixtureGraphRepo":
+            return cls()
+
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            data = deepcopy(payload)
+            image = dict(data.get("image") or {})
+            image.setdefault("image_id", lookup_stub.image_id)
+            data["image"] = image
+            data.setdefault("case_id", f"CASE_{lookup_stub.image_id}")
+            return data
+
+        def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            prepared = self.prepare_upsert_parameters(payload)
+            image_id = prepared["image"]["image_id"]
+            finding_ids = [str(f.get("id") or f"UP_{idx}") for idx, f in enumerate(prepared.get("findings") or [])]
+            self._stored_findings[image_id] = list(finding_ids)
+            return {"image_id": image_id, "finding_ids": finding_ids}
+
+        def query_bundle(self, image_id: str) -> Dict[str, Any]:
+            return {
+                "summary": [
+                    {"rel": "HAS_FINDING", "cnt": 2, "avg_conf": 0.9},
+                    {"rel": "DESCRIBED_BY", "cnt": 1, "avg_conf": 0.85},
+                    {"rel": "SIMILAR_TO", "cnt": 1, "avg_conf": 0.8},
+                ],
+                "facts": {
+                    "image_id": image_id,
+                    "findings": [
+                        {"id": "CTX_F1", "type": "mass", "location": "liver", "conf": 0.92},
+                        {"id": "CTX_F2", "type": "edema", "location": "lung", "conf": 0.81},
+                    ],
+                },
+            }
+
+        def query_paths(
+            self,
+            image_id: str,
+            k: int = 2,
+            *,
+            alpha_finding: Optional[float] = None,
+            beta_report: Optional[float] = None,
+            k_slots: Optional[Dict[str, int]] = None,
+        ) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "label": "Hepatic lesion",
+                    "triples": [
+                        f"Image[{image_id}] -HAS_FINDING-> Finding[CTX_F1]",
+                        "Finding[CTX_F1] -LOCATED_IN-> Anatomy[Liver]",
+                        "Finding[CTX_F1] -RELATED_TO-> Finding[CTX_F2]",
+                    ],
+                    "score": 0.9,
+                    "slot": "findings",
+                },
+                {
+                    "label": "Report context",
+                    "triples": [
+                        f"Image[{image_id}] -DESCRIBED_BY-> Report[CTX_R1]",
+                        "Report[CTX_R1] -MENTIONS-> Finding[CTX_F1]",
+                        "Report[CTX_R1] -MENTIONS-> Finding[CTX_F2]",
+                    ],
+                    "score": 0.83,
+                    "slot": "reports",
+                },
+                {
+                    "label": "Similar study",
+                    "triples": [
+                        f"Image[{image_id}] -SIMILAR_TO-> Image[CTX_SIM_1]",
+                        "Image[CTX_SIM_1] -HAS_FINDING-> Finding[SIM_F1]",
+                        "Finding[SIM_F1] -LOCATED_IN-> Anatomy[Liver]",
+                    ],
+                    "score": 0.8,
+                    "slot": "similarity",
+                },
+            ]
+
+        def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+            return []
+
+        def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+            return 0
+
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(self._stored_findings.get(image_id, []))
+
+        def close(self) -> None:
+            self._closed = True
+
+    monkeypatch.setattr(pipeline_module, "GraphRepo", FixtureGraphRepo)
+    monkeypatch.setattr(pipeline_module, "GraphContextBuilder", RealGraphContextBuilder)
+
+    def _resolve_by_path(cls, path: Optional[str]) -> LookupResult:  # type: ignore[override]
+        return lookup_stub
+
+    def _resolve_by_id(cls, raw_id: str) -> LookupResult:  # type: ignore[override]
+        return lookup_stub
+
+    monkeypatch.setattr(pipeline_module.DummyImageRegistry, "resolve_by_path", classmethod(_resolve_by_path))
+    monkeypatch.setattr(pipeline_module.DummyImageRegistry, "resolve_by_id", classmethod(_resolve_by_id))
 
     app = FastAPI()
     app.include_router(pipeline_module.router)
