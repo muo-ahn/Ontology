@@ -8,3 +8,4 @@ sentence-transformers==2.7.0
 python-multipart==0.0.9
 py2neo==2021.2.4
 redis==5.0.8
+pytest-asyncio==0.23.7
