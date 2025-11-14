@@ -468,6 +468,38 @@ class GraphContextBuilder:
             return json_dumps_safe(context.facts)
         return context.triples_text
 
+    @staticmethod
+    def _fact_paths_from_findings(
+        image_id: str,
+        facts_payload: Dict[str, Any],
+        *,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        findings = list(facts_payload.get("findings") or [])
+        if not findings:
+            return []
+        budget = limit if limit > 0 else len(findings)
+        fallback_paths: List[Dict[str, Any]] = []
+        for idx, finding in enumerate(findings[:budget]):
+            finding_id = str(finding.get("id") or f"FACT_{idx}")
+            finding_type = finding.get("type") or "Finding"
+            location = finding.get("location")
+            triples = [
+                f"Image[{image_id}] -HAS_FINDING-> Finding[{finding_id}]",
+            ]
+            if location:
+                triples.append(f"Finding[{finding_id}] -LOCATED_IN-> Location[{location}]")
+            score = float(finding.get("conf") or 0.5)
+            fallback_paths.append(
+                {
+                    "slot": "findings",
+                    "label": finding_type,
+                    "triples": triples,
+                    "score": score,
+                }
+            )
+        return fallback_paths
+
     def build_context(
         self,
         image_id: str,
@@ -547,6 +579,13 @@ class GraphContextBuilder:
                 beta_report=beta_report,
                 k_slots=slot_limits,
             )
+            if not raw_paths:
+                finding_budget = max(int(slot_limits.get("findings", 0)), 0)
+                raw_paths = self._fact_paths_from_findings(
+                    image_id,
+                    facts_payload,
+                    limit=finding_budget or current_k or len(facts_payload.get("findings") or []),
+                )
             paths_rows = _dedupe_path_rows(raw_paths)
 
             total_budget = sum(max(int(slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)

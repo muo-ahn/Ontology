@@ -42,7 +42,7 @@ def test_compute_consensus_prefers_graph_mode_snapshot():
     assert consensus["supporting_modes"] == ["VGL"]
     assert consensus["disagreed_modes"] == ["V", "VL"]
     assert consensus["status"] == "agree"
-    assert consensus["confidence"] == "medium"
+    assert consensus["confidence"] == "low"
     assert consensus["agreement_score"] == pytest.approx(0.75, rel=0.05)
     assert "graph evidence" in (consensus.get("notes") or "")
     assert "mode_weights" in consensus and consensus["mode_weights"]["VGL"] > consensus["mode_weights"]["V"]

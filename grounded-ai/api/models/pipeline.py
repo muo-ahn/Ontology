@@ -91,3 +91,4 @@ class AnalyzeResp(BaseModel):
     evaluation: Optional[DummyEvaluation] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    label_normalization: List[Dict[str, Any]] = Field(default_factory=list)

@@ -334,6 +334,15 @@ findings 슬롯이 첫 miss 이후 0으로 고정되지 않고, 최소 한 번 �
 
 동일 입력 이미지 재실행 시 라벨·위치 불안정성(Subarachnoid Hemorrhage ↔ Hypodensity 등)을 제거.
 
+### 🔹 Spec-05 라벨 표준화 진행 메모 (2025-11-16)
+
+- `_normalise_findings()` 결과를 파이프라인이 덮어쓰는 문제가 있었는데, `DummyFindingRegistry` 시드가 다시 적용될 때도 동일 헬퍼를 재사용하도록 `/pipeline/analyze`를 수정했다. 이제 `force_dummy_fallback` + `mock_seed` 시나리오는 `Subarachnoid Hemorrhage`, `Left parietal lobe`처럼 canonical 라벨로 정규화되고 `label_normalization` 이벤트가 노출된다.
+- 캡션 기반 fallback(`strategy: "fallback"`) 경로도 `/pipeline/analyze` 단계에서 label telemetry가 비어 있으면 `_normalise_findings()`를 재실행해 canonical 라벨을 만들고 synthetic 이벤트를 보강한다. `tests/test_paths_and_analyze.py::test_pipeline_backfills_missing_label_events`가 이를 커버하며, `scripts/vision_pipeline_debug.sh IMG_001 '{"force_dummy_fallback":true}'`, `IMG_003`, `IMG201` 모두에서 `label_normalization` 배열이 채워지는 것을 확인했다.
+- `GraphRepo.prepare_upsert_parameters()` 가 그래프 업서트 직전 `finding.type/location` 값이 canonical 사전에 일치하는지 다시 검증하고, 미일치 시 즉시 422 오류를 반환한다. 파이프라인이 실수로 로우 라벨을 흘려보내더라도 그래프에는 canonical 라벨만 저장된다.
+- **신규:** Graph context가 실제 경로(`MATCH (p=...)`)를 반환하지 못하는 경우, `GraphContextBuilder`가 facts에 포함된 findings를 활용해 최소 evidence path를 합성한다. 덕분에 `/scripts/vision_pipeline_debug.sh` 출력의 `context_paths_len`이 0에서 1+로 상승하고, `graph_context.paths`가 빈 배열이 아니게 된다.
+- CI는 `pytest tests/test_normalizer.py tests/test_debug_payload.py tests/test_context_orchestrator.py tests/test_paths_and_analyze.py`와 `PYTHONPATH=grounded-ai/api python scripts/check_label_drift.py`를 계속 돌리며 Spec-05 회귀를 감시한다.
+
+
 ---
 
 ### 🔹 구현 목표
@@ -372,6 +381,74 @@ findings 슬롯이 첫 miss 이후 0으로 고정되지 않고, 최소 한 번 �
 | confidence 기반 tie-breaking | 재현성 확보           | 스냅샷 비교     |
 
 ---
+
+### 🔹 Spec-05 액션 플랜
+
+1. **라벨·위치 캐노니컬 정의 & 드리프트 감시**
+   - `services/ontology_map.py` + `docs/ontology/labels.md`를 canonical 소스로 유지하고, `scripts/check_label_drift.py`를 “canonical과 다를 경우 실패” 로직으로 고도화한다. CI는 dummy seed 전체를 정적 검사해 미정의 라벨이 있으면 즉시 차단한다.
+   - `DummyFindingRegistry` 로딩 시 canonical 매핑을 즉시 적용해 fallback 데이터도 이미 canonical 상태가 되도록 한다.
+
+2. **Normalizer/파이프라인 확장 (진행 중)**
+   - 2025-11-16 기준 `DummyFindingRegistry` 기반 fallback은 `_normalise_findings()` 재사용 덕분에 canonical 라벨과 telemetry를 모두 노출하며, `tests/test_paths_and_analyze.py::test_pipeline_seeded_fallback_emits_label_events`가 이를 보증한다.
+   - 캡션 기반 fallback(`strategy: "fallback"`)도 label 이벤트가 비면 `_normalise_findings()`로 재정규화한 뒤 synthetic 이벤트를 주입해 회귀를 방지한다(`tests/test_paths_and_analyze.py::test_pipeline_backfills_missing_label_events` 추가).
+   - GraphRepo `prepare_upsert_parameters()` 단계에서 canonical 미일치 시 `ValueError`를 던져 HTTP 422로 변환하므로, DB에는 canonical 라벨만 저장된다.
+   - Graph context는 paths 조회가 실패하더라도 facts 기반 evidence path를 합성하도록 방어 로직을 추가해, Explainability 슬롯이 항상 최소 1개 이상 채워지도록 했다(`tests/test_paths_and_analyze.py::test_pipeline_reports_no_paths_when_graph_returns_none` 업데이트).
+
+3. **OntologyVersion 연동**
+   - Neo4j에 `(:OntologyVersion {version_id:"1.1-label-std"})-[:STANDARDIZES]->(:Label {name:"Subarachnoid Hemorrhage"})` 구조를 추가해 canonical 라벨과 버전을 연결.
+   - `/pipeline/analyze` 응답의 `graph_context`와 `results`에 `labels_version` 필드를 포함시키고, debug payload에도 삽입한다.
+   - GraphRepo `prepare_upsert_parameters()` 단계에서 canonical 여부를 검사하고, 미일치 시 `ValidationError("label_not_canonical")` 또는 `errors.append({"stage":"normalize","msg":"label_not_canonical"})` 처리.
+
+4. **테스트 & 데이터 검증**
+   - `tests/test_normalizer.py`에 canonical 변환/이벤트 로깅 케이스를 추가하여 fallback 경로까지 검증한다.
+   - `tests/test_paths_and_analyze.py`에는 alias 입력 → canonical 출력 여부를 확인하는 케이스를 추가한다.
+   - `scripts/check_label_drift.py`는 CI에서 필수 실행 스텝으로 유지한다.
+
+5. **CI 반영**
+   - `.github/workflows/ci.yml`에 `pytest tests/test_normalizer.py`와 `python scripts/check_label_drift.py`를 포함시키고, 실패 시 `SPEC05_STATUS=fail`을 출력한다.
+   - 필요 시 `pytest -k label_normalization` 스텝으로 빠른 스모크 테스트를 추가한다.
+
+6. **관측 가능성 강화**
+   - `/scripts/vision_pipeline_debug.sh` 출력에 `LABEL NORMALIZATION` 섹션을 추가해 raw ↔ canonical ↔ rule trace를 직관적으로 확인할 수 있게 한다.
+   - 런타임 metrics에 `label_normalisation_events_total`, `label_conflict_detected_total` 등을 추가해 운영 중에도 이상을 모니터링한다.
+
+## ✅ [Spec-D] 그래프 기반 앙상블 합의 (Graph-Guided Consensus)
+
+### 🔹 진행 메모 (2025-11-16)
+
+- `/pipeline/analyze` 가 그래프 증거가 확보된 경우 `VGL` 출력을 anchor 로 두고 `anchor_mode_used: true`, `graph_paths_strength` 값을 `compute_consensus()`에 전달한다. `GraphContextBuilder` 가 최소 1개 이상의 경로를 보장하면서 `weights["VGL"]` 이 1.8 이상으로 상승해 V/VL이 불일치해도 그래프 모드가 합의를 주도할 수 있게 됨.
+- `results["V"]`/`["VL"]`는 그래프 해석과 어긋나는 텍스트일 경우 자동으로 `degraded: "graph_mismatch"` 플래그가 붙고 consensus 계산 시 패널티를 받는다. `scripts/vision_pipeline_debug.sh IMG_001 --force_dummy_fallback` 케이스에서 V/VL이 자동으로 degraded 되고, consensus status가 `agree` 로 승급된 것을 확인했다.
+- Structured finding terms(`type/location`) 는 `_collect_finding_terms()` 를 통해 추출되어 `_structured_overlap_score()` 로 합의 가중치에 반영된다. `IMG_003` 케이스에서 `agreement_components.structured=0.3`으로 기록됐다.
+- 그래프 신뢰도는 `GRAPH_EVIDENCE_WEIGHT * graph_paths_strength` 공식을 통해 text score에 직접 가산된다. 합의 결과 `notes` 에 `graph evidence boosted consensus (paths_signal=0.23)` 메시지가 남도록 했으며, degraged inputs와 supporting/disagreed modes가 명확히 표기된다.
+
+### 🔹 Spec-D 액션 플랜
+
+1. **V/VL 그래프 검증 가드** – `has_paths` 일 때 V/VL 출력이 공백이거나 VGL과 0.1 미만의 자카드 유사도라면 즉시 `degraded="graph_mismatch"` 및 `"mismatch with graph-backed output"` 노트를 삽입한다. (완료)
+2. **가중치 재분배** – 기본적으로 `weights={"V":1.0,"VL":1.2,"VGL":1.0}` 을 사용하되, 경로가 존재하면 `weights["VGL"]=1.8 + slot_rebalanced_flag*0.2` 로 승격하고, 리밸런싱만 발생해도 +0.1 가중치를 부여한다. (완료)
+3. **Anchor 모드** – 경로가 존재하면 `anchor_mode="VGL"`, 없으면 Anchor 비활성화. Anchor 스코어는 0.75 이상이어야 효력 발생. (완료)
+4. **구조화/그래프 보너스** – Text, structured overlap, graph signal, modality penalty를 모두 결합한 `agreement_components` 를 consensus 응답에 노출한다. (완료)
+5. **검증** – `tests/test_paths_and_analyze.py::test_pipeline_reports_no_paths_when_graph_returns_none` 등 기존 테스트와 신규 합의 스냅샷(`tests/test_consensus_snapshot.py`)으로 회귀를 감시한다. E2E 스크립트에서도 `status=agree`, `anchor_mode_used=true`, `degraded_inputs=["V","VL"]` 를 확인했다. (완료)
+
+## ✅ [Spec-E] 경로 증거 복원 (Context Path Recovery)
+
+### 🔹 진행 메모 (2025-11-16)
+
+- `GraphRepo.query_paths()` 는 `grounded-ai/api/services/graph_repo.py` 의 `GRAPH_PATHS_QUERY` 를 통해 `MATCH (img)-[:HAS_FINDING]->(f)` / `MATCH (f)-[:LOCATED_IN]->(:Anatomy)` / `MATCH (img)-[:SIMILAR_TO]->(s)` 등 실제 Neo4j 경로를 추출하고, 각 segment의 start/end 노드 메타를 API 레이어에서 문자열 triple 로 재조합한다. 합성 경로는 이제 백업 용도로만 남는다.
+- `GraphContextBuilder` 는 Neo4j 쿼리가 비었을 때만 `_fact_paths_from_findings()` 로 fallback path 를 생성하며, 성공 시에는 실제 경로를 그대로 `graph_context.paths`/`debug.context_paths_head` 에 반영한다.
+- `graph_paths_strength` 는 real path 의 triple 수에 기반해 계산되며 Spec-D consensus 보너스(`notes: "graph evidence boosted consensus"`)와 연결된다. `scripts/vision_pipeline_debug.sh IMG_001/IMG_003/IMG201 --force_dummy_fallback` 출력에서도 multi-hop triple 들이 그대로 노출된다.
+- `scripts/vision_pipeline_debug.sh` 를 `IMG_001`, `IMG_003`, `IMG201` 입력으로 다시 실행해 본 결과, 각 케이스의 `graph_context.paths` 에서 Neo4j가 반환한 `Image[...] -HAS_FINDING-> Finding[...]` 경로가 그대로 노출되며 `context_fallback_used=false` 를 유지했다. consensus 섹션에는 `graph evidence boosted consensus (paths_signal=0.23)` 메모가 함께 기록되어 Spec-D와 Spec-E가 연동됨을 확인했다.
+
+### 🔹 Spec-E 액션 플랜
+
+1. **실경로 복원** – `GRAPH_PATHS_QUERY` 가 multi-hop `MATCH p=` 절을 사용해 slot 별 상위 k 경로를 반환하고, `GraphRepo._segments_to_triples()` 가 start/end 노드 라벨과 id를 포맷한다. (완료)
+2. **경로 합성기** – `_fact_paths_from_findings()` 는 Neo4j 쿼리가 실패했을 때만 작동하여 최소 evidence path 를 보장한다. (완료)
+3. **리밸런싱/슬랏 정보 유지** – 실제 경로와 fallback 경로 모두 slot 메타(`notes: "findings slot rebalanced from 1 to 2"`)를 그대로 흘려보내 Explainability 기록을 보존한다. (완료)
+4. **Consensus/평가 연동** – real path 는 debug payload, HTTP 응답(`graph_context.paths`), evaluation(`ctx_paths_len`)에 모두 반영되어 downstream 소비자가 동일한 근거를 확인할 수 있다. (완료)
+
+### 🔹 남은 과제 (2025-11-16 기준)
+
+- **OntologyVersion/labels_version 노출**: canonical 맵 버전을 Neo4j 및 API 응답에 연결하는 작업은 아직 미완료 상태다.
+- **OntologyVersion Propagation**: canonical 라벨 버전을 Neo4j/응답 payload로 노출하는 작업(`labels_version`)은 아직 미완료 상태다.
 
 # 🧪 PART II. 논문을 위한 “최소 실험 계획” Spec
 

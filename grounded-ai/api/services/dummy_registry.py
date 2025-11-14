@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from services.ontology_map import canonicalise_label, canonicalise_location
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "medical_dummy"
@@ -154,10 +155,12 @@ def _load_fallback_findings() -> Dict[str, List[FindingStub]]:
                 canonical_id = DummyImageRegistry.normalise_id(image_id_raw)
             except ValueError:
                 continue
+            canonical_type, _ = canonicalise_label(raw.get("type") or None)
+            canonical_location, _ = canonicalise_location(raw.get("location") or None)
             stub = FindingStub(
                 finding_id=finding_id.strip(),
-                type=(raw.get("type") or None),
-                location=(raw.get("location") or None),
+                type=canonical_type or (raw.get("type") or None),
+                location=canonical_location or (raw.get("location") or None),
                 size_cm=_coerce_float(raw.get("size_cm")),
                 conf=_coerce_float(raw.get("conf")),
             )

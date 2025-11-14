@@ -35,6 +35,7 @@ jobs:
             tests/test_context_orchestrator.py \
             tests/test_consensus_snapshot.py \
             tests/test_debug_payload.py \
+            tests/test_normalizer.py \
             tests/test_paths_and_analyze.py \
             -q
 
@@ -43,3 +44,9 @@ jobs:
           PYTHONPATH: grounded-ai/api
         run: |
           pytest tests/test_paths_and_analyze.py -k slot_rebalance -q
+
+      - name: Label drift check
+        env:
+          PYTHONPATH: grounded-ai/api
+        run: |
+          python scripts/check_label_drift.py

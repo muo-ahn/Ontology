@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from itertools import combinations
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 import hashlib
 
 import httpx
@@ -30,7 +30,7 @@ from services.graph_repo import GraphRepo
 from services.fallback_meta import FallbackMeta, FallbackMetaError, coerce_fallback_meta, FallbackMetaGuard
 from services.image_identity import ImageIdentityError, identify_image
 from services.llm_runner import LLMRunner
-from services.normalizer import normalize_from_vlm
+from services.normalizer import normalize_from_vlm, _normalise_findings
 from services.consensus import compute_consensus, normalise_for_consensus, _jaccard_similarity
 from services.similarity import compute_similarity_scores
 from services.vlm_runner import VLMRunner
@@ -290,6 +290,49 @@ async def analyze(
         except FindingValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.detail) from exc
 
+    def _has_raw_markers(findings: Iterable[Dict[str, Any]]) -> bool:
+        return any(("raw_type" in (finding or {})) or ("raw_location" in (finding or {})) for finding in findings or [])
+
+    def _build_label_events_from_findings(
+        findings: Iterable[Dict[str, Any]],
+        *,
+        default_rule: str = "synthetic",
+    ) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        for finding in findings or []:
+            if not isinstance(finding, dict):
+                continue
+            finding_id = finding.get("id")
+            if not isinstance(finding_id, str) or not finding_id:
+                continue
+            raw_type = finding.get("raw_type") or finding.get("type")
+            canonical_type = finding.get("type")
+            type_rule = finding.get("type_rule") or (raw_type and "canonical") or default_rule
+            if raw_type:
+                events.append(
+                    {
+                        "finding_id": finding_id,
+                        "field": "type",
+                        "raw": raw_type,
+                        "canonical": canonical_type or raw_type,
+                        "rule": type_rule or default_rule,
+                    }
+                )
+            raw_location = finding.get("raw_location") or finding.get("location")
+            canonical_location = finding.get("location")
+            location_rule = finding.get("location_rule") or (raw_location and "canonical") or default_rule
+            if raw_location:
+                events.append(
+                    {
+                        "finding_id": finding_id,
+                        "field": "location",
+                        "raw": raw_location,
+                        "canonical": canonical_location or raw_location,
+                        "rule": location_rule or default_rule,
+                    }
+                )
+        return events
+
     def _safe_preview(value: Any, limit: int = 2) -> Any:
         if isinstance(value, list):
             return value[:limit]
@@ -454,8 +497,18 @@ async def analyze(
         normalized["report"] = normalized_report
 
         # Normalize + dedup findings (keep list[dict] invariant)
+        label_normalization_events: List[Dict[str, Any]] = list(normalized.get("label_normalization") or [])
         normalized_findings = dedup_findings(list(normalized.get("findings") or []))
         normalized_findings = _validate_findings(normalized_findings)
+
+        if not label_normalization_events and normalized_findings:
+            if not _has_raw_markers(normalized_findings):
+                regenerated_events: List[Dict[str, Any]] = []
+                regenerated = _normalise_findings(normalized_findings, image_id, capture_events=regenerated_events)
+                normalized_findings = _validate_findings(dedup_findings(regenerated))
+                label_normalization_events = regenerated_events
+            else:
+                label_normalization_events = _build_label_events_from_findings(normalized_findings)
 
         seeded_finding_ids: List[str] = []
         seeded_records: List[Dict[str, Any]] = []
@@ -490,8 +543,16 @@ async def analyze(
 
         seeded_applied = False
         if (force_dummy_fallback or not normalized_findings) and seeded_records:
-            normalized_findings = dedup_findings(seeded_records)
+            seeded_label_events: List[Dict[str, Any]] = []
+            canonical_seeded = _normalise_findings(
+                seeded_records,
+                image_id,
+                capture_events=seeded_label_events,
+            )
+            normalized_findings = dedup_findings(canonical_seeded or seeded_records)
             normalized_findings = _validate_findings(normalized_findings)
+            if seeded_label_events:
+                label_normalization_events = seeded_label_events
             seeded_applied = True
             fallback_used = True
             fallback_registry_hit = True
@@ -499,6 +560,7 @@ async def analyze(
                 fallback_strategy = "mock_seed"
 
         normalized["findings"] = normalized_findings
+        normalized["label_normalization"] = list(label_normalization_events)
 
         seeded_finding_ids: List[str] = []
         for finding in normalized_findings:
@@ -576,6 +638,7 @@ async def analyze(
             provenance=provenance_payload,
             pre_upsert_findings=normalized_findings,
             report_confidence=normalized_report.get("conf"),
+            label_normalization=label_normalization_events,
         )
 
         graph_repo = GraphRepo.from_env()
@@ -608,7 +671,11 @@ async def analyze(
             "findings": normalized_findings,
             "idempotency_key": payload.idempotency_key,
         }
-        prepared_graph_payload = graph_repo.prepare_upsert_parameters(graph_payload)
+        try:
+            prepared_graph_payload = graph_repo.prepare_upsert_parameters(graph_payload)
+        except ValueError as exc:
+            errors.append({"stage": "upsert", "msg": str(exc)})
+            raise HTTPException(status_code=422, detail={"ok": False, "errors": errors}) from exc
         if debug_enabled:
             debug_builder.record_upsert_payload(raw_payload=graph_payload, prepared_payload=prepared_graph_payload)
         with timeit(timings, "upsert_ms"):
@@ -1013,6 +1080,7 @@ async def analyze(
             "errors": errors,
             "debug": debug_builder.payload(),
             "evaluation": evaluation_payload,
+            "label_normalization": label_normalization_events,
         }
         fallback_guard.ensure(results["finding_fallback"], stage="response.results")
         fallback_guard.ensure(evaluation_payload["finding_fallback"], stage="response.evaluation")

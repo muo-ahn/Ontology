@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from services.dummy_registry import DummyFindingRegistry, FindingStub
+from services.ontology_map import canonicalise_label, canonicalise_location
 from services.vlm_runner import VLMRunner
 
 
@@ -199,13 +200,21 @@ def _parse_json_output(output: str) -> Dict[str, Any]:
 def _normalise_findings(
     raw_findings: Iterable[Any],
     image_id: str,
+    *,
+    capture_events: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     findings: List[Dict[str, Any]] = []
     for item in raw_findings:
         if not isinstance(item, dict):
             continue
-        finding_type = item.get("type")
-        location = item.get("location")
+        raw_type = item.get("type")
+        canonical_type, type_rule = canonicalise_label(raw_type)
+        finding_type = canonical_type or raw_type
+
+        raw_location = item.get("location")
+        canonical_location, location_rule = canonicalise_location(raw_location)
+        location = canonical_location or raw_location
+
         size_cm = _coerce_float(item.get("size_cm"))
         if size_cm is not None:
             size_cm = round(size_cm, 1)
@@ -214,16 +223,43 @@ def _normalise_findings(
         if not finding_id:
             finding_id = _derive_finding_id(image_id, finding_type, location, size_cm)
         source = item.get("source")
-        findings.append(
-            {
-                "id": finding_id,
-                "type": finding_type,
-                "location": location,
-                "size_cm": size_cm,
-                "conf": conf,
-                **({"source": source} if source else {}),
-            }
-        )
+        payload: Dict[str, Any] = {
+            "id": finding_id,
+            "type": finding_type,
+            "location": location,
+            "size_cm": size_cm,
+            "conf": conf,
+            **({"source": source} if source else {}),
+        }
+        if canonical_type and raw_type and canonical_type != raw_type:
+            payload["raw_type"] = raw_type
+            payload["type_rule"] = type_rule
+        if canonical_location and raw_location and canonical_location != raw_location:
+            payload["raw_location"] = raw_location
+            payload["location_rule"] = location_rule
+        findings.append(payload)
+
+        if capture_events is not None:
+            if raw_type:
+                capture_events.append(
+                    {
+                        "finding_id": finding_id,
+                        "field": "type",
+                        "raw": raw_type,
+                        "canonical": finding_type or raw_type,
+                        "rule": type_rule or "unchanged",
+                    }
+                )
+            if raw_location:
+                capture_events.append(
+                    {
+                        "finding_id": finding_id,
+                        "field": "location",
+                        "raw": raw_location,
+                        "canonical": location or raw_location,
+                        "rule": location_rule or "unchanged",
+                    }
+                )
     return findings
 
 
@@ -306,7 +342,8 @@ async def normalize_from_vlm(
         report_id = _derive_report_id(resolved_image_id, caption_text or output, model_name)
 
     findings_raw = parsed.get("findings") if isinstance(parsed.get("findings"), list) else []
-    findings = _normalise_findings(findings_raw, resolved_image_id)
+    label_events: List[Dict[str, Any]] = []
+    findings = _normalise_findings(findings_raw, resolved_image_id, capture_events=label_events)
 
     fallback_registry_hit = False
     fallback_candidates: List[Dict[str, Any]] = []
@@ -321,7 +358,7 @@ async def normalize_from_vlm(
             fallback_strategy = (
                 "mock_seed" if fallback_registry_hit else fallback_candidates[0].get("source") or "caption_keywords"
             )
-            findings = _normalise_findings(fallback_candidates, resolved_image_id)
+            findings = _normalise_findings(fallback_candidates, resolved_image_id, capture_events=label_events)
             fallback_used = True
         elif not findings:
             findings = []
@@ -349,6 +386,7 @@ async def normalize_from_vlm(
         "caption_ko": caption_ko,
         "vlm_latency_ms": latency_ms,
         "raw_vlm": raw_result,
+        "label_normalization": label_events,
     }
     normalized["finding_fallback"] = {
         "used": fallback_used,

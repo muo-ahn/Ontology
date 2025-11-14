@@ -23,6 +23,7 @@ def test_builder_records_identity_fields():
         provenance={"finding_source": "vlm"},
         pre_upsert_findings=[{"id": "F1", "type": "mass"}],
         report_confidence=0.9,
+        label_normalization=[{"finding_id": "F1", "field": "type", "raw": "SAH", "canonical": "Subarachnoid Hemorrhage"}],
     )
     payload = builder.payload()
     assert payload["norm_image_id"] == "IMG001"
@@ -30,6 +31,7 @@ def test_builder_records_identity_fields():
     assert payload["finding_source"] == "vlm"
     assert payload["pre_upsert_findings_len"] == 1
     assert payload["pre_upsert_report_conf"] == 0.9
+    assert payload["label_normalization"][0]["canonical"] == "Subarachnoid Hemorrhage"
 
 
 def test_builder_context_marks_graph_degrade():

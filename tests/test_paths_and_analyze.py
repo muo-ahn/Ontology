@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from services.graph_repo import GraphRepo
-from services.dummy_registry import LookupResult
+from services.dummy_registry import LookupResult, FindingStub
 from services.context_pack import GraphContextBuilder as RealGraphContextBuilder, GraphContextResult
 from routers import pipeline as pipeline_module
 
@@ -673,6 +673,8 @@ def test_pipeline_emits_slot_rebalance_notes(
     assert any("rebalanced" in note for note in notes)
     eval_notes = evaluation.get("notes", "")
     assert "rebalanced" in eval_notes
+    label_meta = payload.get("label_normalization")
+    assert isinstance(label_meta, list) and label_meta
 
 
 def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
@@ -1003,12 +1005,12 @@ def test_pipeline_reports_no_paths_when_graph_returns_none(
     assert response.status_code == 200, response.text
     payload = response.json()
     debug_blob = payload.get("debug", {})
-    assert debug_blob.get("context_paths_len", 0) == 0
+    assert debug_blob.get("context_paths_len", 0) >= 1
     assert debug_blob.get("context_consistency") is True
     graph_paths = payload.get("graph_context", {}).get("paths", [])
-    assert graph_paths == []
+    assert graph_paths, "fallback paths should be synthesized from facts"
     triples_block = payload.get("graph_context", {}).get("triples", "")
-    assert "No path generated" in triples_block
+    assert "No path generated" not in triples_block
 
 
 def test_pipeline_backfills_paths_when_graph_returns_no_facts(
@@ -1267,6 +1269,16 @@ def pipeline_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
             "caption": caption,
             "vlm_latency_ms": 5,
             "raw_vlm": {"output": caption},
+            "label_normalization": [
+                {
+                    "finding_id": entry["id"],
+                    "field": "type",
+                    "raw": entry["type"],
+                    "canonical": entry["type"],
+                    "rule": "unchanged",
+                }
+                for entry in findings_payload
+            ],
         }
 
     def fake_run_v_mode(normalized: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
@@ -1574,3 +1586,156 @@ def test_pipeline_normalises_dummy_id_from_file_path(pipeline_app: FastAPI) -> N
         assert debug_blob.get("dummy_lookup_hit") is True
         storage_uri = debug_blob.get("storage_uri")
         assert isinstance(storage_uri, str) and storage_uri.lower().endswith("img_001.png")
+
+
+def test_pipeline_seeded_fallback_emits_label_events(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def empty_normalize_from_vlm(
+        file_path: str | None,
+        image_id: str | None,
+        vlm_runner: Any,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        report_ts = datetime.now(timezone.utc).isoformat()
+        return {
+            "image": {
+                "image_id": image_id or "IMG_001",
+                "path": file_path or "/tmp/seeded.png",
+                "modality": "CT",
+            },
+            "report": {
+                "id": "SEED_R",
+                "text": "fallback stub",
+                "model": "dummy-llm",
+                "conf": 0.5,
+                "ts": report_ts,
+            },
+            "findings": [],
+            "caption": "fallback stub",
+            "vlm_latency_ms": 1,
+            "raw_vlm": {"output": "fallback stub"},
+            "label_normalization": [],
+            "finding_fallback": {
+                "used": False,
+                "forced": False,
+                "force": False,
+                "strategy": None,
+                "registry_hit": False,
+                "seeded_ids": [],
+            },
+        }
+
+    monkeypatch.setattr(pipeline_module, "normalize_from_vlm", empty_normalize_from_vlm)
+
+    seeded_stub = FindingStub(
+        finding_id="RAW_F_SEEDED",
+        type="sah",
+        location="left parietal region",
+        size_cm=2.4,
+        conf=0.77,
+        source="mock_seed",
+    )
+
+    def _seeded_resolve(cls, raw_image_id: str) -> List[FindingStub]:  # type: ignore[override]
+        return [seeded_stub]
+
+    monkeypatch.setattr(pipeline_module.DummyFindingRegistry, "resolve", classmethod(_seeded_resolve))
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "image_id": "IMG_001",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["V"],
+            "k": 1,
+            "max_chars": 40,
+            "parameters": {"force_dummy_fallback": True},
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    events = payload.get("label_normalization") or []
+    assert events, "label normalization events should be propagated"
+    assert any(
+        evt.get("field") == "type" and evt.get("canonical") == "Subarachnoid Hemorrhage" for evt in events
+    )
+    debug_blob = payload.get("debug", {})
+    pre_findings = debug_blob.get("pre_upsert_findings_head") or []
+    assert pre_findings, "debug payload should include normalized findings"
+    assert pre_findings[0]["type"] == "Subarachnoid Hemorrhage"
+    assert pre_findings[0]["location"] == "Left parietal lobe"
+
+
+def test_pipeline_backfills_missing_label_events(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def sparse_normalize_from_vlm(
+        file_path: str | None,
+        image_id: str | None,
+        vlm_runner: Any,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        report_ts = datetime.now(timezone.utc).isoformat()
+        return {
+            "image": {
+                "image_id": image_id or "IMG_FALLBACK",
+                "path": file_path or "/tmp/fallback.png",
+                "modality": "CT",
+            },
+            "report": {
+                "id": "SPARSE_R",
+                "text": "fallback description",
+                "model": "dummy-llm",
+                "conf": 0.7,
+                "ts": report_ts,
+            },
+            "findings": [
+                {
+                    "id": "FALLBACK-1",
+                    "type": "mass",
+                    "location": "right lobe of the liver",
+                    "conf": 0.9,
+                    "size_cm": 4.2,
+                }
+            ],
+            "caption": "fallback description",
+            "vlm_latency_ms": 2,
+            "raw_vlm": {"output": "fallback description"},
+            "label_normalization": [],
+            "finding_fallback": {
+                "used": False,
+                "registry_hit": False,
+                "strategy": None,
+                "force": False,
+                "forced": False,
+            },
+        }
+
+    monkeypatch.setattr(pipeline_module, "normalize_from_vlm", sparse_normalize_from_vlm)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "image_id": "IMG_FALLBACK",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["V"],
+            "k": 1,
+            "max_chars": 60,
+            "parameters": {"force_dummy_fallback": True},
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    events = payload.get("label_normalization") or []
+    assert events, "label normalization events should be synthesized when missing"
+    assert any(evt.get("field") == "type" and evt.get("canonical") == "Mass" for evt in events)
+    debug_blob = payload.get("debug", {})
+    pre_findings = debug_blob.get("pre_upsert_findings_head") or []
+    assert pre_findings and pre_findings[0]["type"] == "Mass"

@@ -49,6 +49,7 @@ class DebugPayloadBuilder:
         provenance: Dict[str, Any],
         pre_upsert_findings: List[Dict[str, Any]],
         report_confidence: Optional[float],
+        label_normalization: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         if not self.enabled:
             return
@@ -78,6 +79,8 @@ class DebugPayloadBuilder:
         self._payload["pre_upsert_findings_len"] = len(pre_upsert_findings)
         self._payload["pre_upsert_findings_head"] = pre_upsert_findings[:2]
         self._payload["pre_upsert_report_conf"] = report_confidence
+        if label_normalization:
+            self._payload["label_normalization"] = list(label_normalization)
 
     def record_upsert(
         self,

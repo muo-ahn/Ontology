@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import List
 
 import pytest
 
@@ -52,11 +53,27 @@ def test_fallback_keyword_path_when_registry_miss() -> None:
     normalised = _normalise_findings(fallbacks, "IMG999")
     assert len(normalised) == 1
     norm_entry = normalised[0]
-    assert norm_entry["type"] == "nodule"
-    assert norm_entry["location"] == "right middle lobe"
+    assert norm_entry["type"] == "Nodule"
+    assert norm_entry["location"] == "Right middle lobe"
     assert norm_entry["size_cm"] == 1.3
     assert norm_entry["source"] == "caption_keywords"
     assert norm_entry["id"].startswith("f_")
+
+
+def test_normalise_findings_canonicalises_labels() -> None:
+    events: List[Dict[str, Any]] = []
+    findings = _normalise_findings(
+        [
+            {"id": "raw-1", "type": "SAH", "location": "left parietal region", "conf": 0.8},
+        ],
+        "IMG_CAN",
+        capture_events=events,
+    )
+    assert findings[0]["type"] == "Subarachnoid Hemorrhage"
+    assert findings[0]["raw_type"] == "SAH"
+    assert findings[0]["location"] == "Left parietal lobe"
+    assert findings[0]["raw_location"] == "left parietal region"
+    assert events and events[0]["canonical"] == "Subarachnoid Hemorrhage"
 
 
 @pytest.mark.asyncio
@@ -77,6 +94,7 @@ async def test_normalize_from_vlm_populates_mock_seed_fallback(tmp_path: Path) -
         "registry_hit": True,
         "strategy": "mock_seed",
         "force": False,
+        "forced": False,
     }
     findings = normalized.get("findings") or []
     assert [item.get("id") for item in findings] == ["F201", "F202"]
@@ -101,14 +119,17 @@ async def test_normalize_from_vlm_keyword_fallback(tmp_path: Path) -> None:
         "registry_hit": False,
         "strategy": "caption_keywords",
         "force": False,
+        "forced": False,
     }
     findings = normalized.get("findings") or []
     assert len(findings) == 1
     entry = findings[0]
-    assert entry["type"] == "nodule"
-    assert entry["location"] == "right middle lobe"
+    assert entry["type"] == "Nodule"
+    assert entry["location"] == "Right middle lobe"
     assert entry["size_cm"] == 1.5
     assert entry["source"] == "caption_keywords"
+    events = normalized.get("label_normalization") or []
+    assert any(event.get("field") == "location" for event in events)
 
 
 @pytest.mark.asyncio
@@ -139,9 +160,40 @@ async def test_normalize_from_vlm_forced_fallback(tmp_path: Path) -> None:
         "registry_hit": True,
         "strategy": "mock_seed",
         "force": True,
+        "forced": True,
     }
     findings = normalized.get("findings") or []
     assert [item.get("id") for item in findings] == ["F201", "F202"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_from_vlm_records_label_normalization(tmp_path: Path) -> None:
+    image_path = tmp_path / "img4.png"
+    image_path.write_bytes(b"\x89PNG")
+    payload = {
+        "output": json.dumps(
+            {
+                "findings": [
+                    {"id": "raw-1", "type": "SAH", "location": "Left parietal region", "conf": 0.9},
+                ]
+            }
+        ),
+        "latency_ms": 7,
+    }
+    runner = DummyVLMRunner(payload)
+
+    normalized = await normalize_from_vlm(
+        file_path=str(image_path),
+        image_id="IMG_LABEL",
+        vlm_runner=runner,
+    )
+
+    events = normalized.get("label_normalization") or []
+    assert events, "label normalization events missing"
+    assert events[0]["canonical"] == "Subarachnoid Hemorrhage"
+    finding = normalized.get("findings", [])[0]
+    assert finding["type"] == "Subarachnoid Hemorrhage"
+    assert finding["location"] == "Left parietal lobe"
 
 
 @pytest.mark.asyncio

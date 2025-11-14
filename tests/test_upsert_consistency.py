@@ -32,8 +32,8 @@ def test_upsert_returns_and_verifies_finding_ids():
         "findings": [
             {
                 "id": "FIND-12345",
-                "type": "mass",
-                "location": "right lobe of the liver",
+                "type": "Mass",
+                "location": "Right lobe of the liver",
                 "conf": 0.9,
                 "size_cm": 5.0,
             }

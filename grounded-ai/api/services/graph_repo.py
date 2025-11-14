@@ -13,8 +13,19 @@ import logging
 
 from neo4j import GraphDatabase  # type: ignore
 from neo4j.exceptions import Neo4jError  # type: ignore
+from services.ontology_map import canonicalise_label, canonicalise_location
 
 logger = logging.getLogger(__name__)
+
+_NODE_LABEL_PRIORITY: tuple[str, ...] = (
+    "Image",
+    "Finding",
+    "Report",
+    "Anatomy",
+    "Encounter",
+    "Patient",
+    "Study",
+)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -27,9 +38,6 @@ def _env_float(name: str, default: float) -> float:
         logger.warning("Invalid float for %s=%s; falling back to %s", name, value, default)
         return default
 
-
-PATH_SCORE_ALPHA_FINDING = _env_float("PATH_SCORE_ALPHA_FINDING", 0.6)
-PATH_SCORE_BETA_REPORT = _env_float("PATH_SCORE_BETA_REPORT", 0.4)
 
 UPSERT_CASE_QUERY = """
 WITH $image AS img
@@ -216,138 +224,210 @@ RETURN {
 """
 
 # Cypher query retrieving weighted top-k explanation paths for a given image.
-TOPK_PATHS_QUERY = """
+GRAPH_PATHS_QUERY = """
 WITH $image_id AS qid,
-     toFloat(coalesce($alpha_finding,0.6)) AS A,
-     toFloat(coalesce($beta_report,0.4))   AS B,
-     CASE
-         WHEN $k_findings IS NULL THEN toInteger(coalesce($k, 0))
-         ELSE toInteger($k_findings)
-     END AS k_findings_raw,
-     CASE
-         WHEN $k_reports IS NULL THEN toInteger(coalesce($k, 0))
-         ELSE toInteger($k_reports)
-     END AS k_reports_raw,
-     CASE
-         WHEN $k_similarity IS NULL THEN toInteger(coalesce($k, 0))
-         ELSE toInteger($k_similarity)
-     END AS k_similarity_raw
-MATCH (q:Image {image_id: qid})
-WITH q,
-     CASE WHEN k_findings_raw < 0 THEN 0 ELSE k_findings_raw END AS k_findings,
-     CASE WHEN k_reports_raw < 0 THEN 0 ELSE k_reports_raw END AS k_reports,
-     CASE WHEN k_similarity_raw < 0 THEN 0 ELSE k_similarity_raw END AS k_similarity,
-     A,
-     B
+     CASE WHEN $k_findings IS NULL THEN toInteger(coalesce($k, 0)) ELSE toInteger($k_findings) END AS raw_findings,
+     CASE WHEN $k_reports IS NULL THEN toInteger(coalesce($k, 0)) ELSE toInteger($k_reports) END AS raw_reports,
+     CASE WHEN $k_similarity IS NULL THEN toInteger(coalesce($k, 0)) ELSE toInteger($k_similarity) END AS raw_similarity
+MATCH (img:Image {image_id: qid})
+WITH img,
+     CASE WHEN raw_findings < 0 THEN 0 ELSE raw_findings END AS k_findings,
+     CASE WHEN raw_reports < 0 THEN 0 ELSE raw_reports END AS k_reports,
+     CASE WHEN raw_similarity < 0 THEN 0 ELSE raw_similarity END AS k_similarity
 CALL {
-  WITH q, k_findings
-  OPTIONAL MATCH (q)-[:HAS_FINDING]->(f:Finding)
-  WHERE f IS NOT NULL
-  WITH q, k_findings, f
+  WITH img, k_findings
+  OPTIONAL MATCH (img)-[:HAS_FINDING]->(f:Finding)
+  WITH img, k_findings, f
   ORDER BY coalesce(f.conf, 0.0) DESC, f.id
-  WITH q, k_findings, collect(f) AS f_list
-  WITH q, k_findings,
-       CASE WHEN k_findings <= 0 THEN [] ELSE f_list[0..k_findings - 1] END AS trimmed
-  UNWIND trimmed AS f
-  OPTIONAL MATCH (f)-[:LOCATED_IN]->(a:Anatomy)
-  OPTIONAL MATCH (f)-[:RELATED_TO]->(rel:Finding)
-  WITH q, f,
-       head([node IN collect(DISTINCT a) WHERE node IS NOT NULL]) AS loc_anatomy,
-       head([node IN collect(DISTINCT rel) WHERE node IS NOT NULL]) AS related_finding
-  WITH {
-    slot: 'findings',
-    label: coalesce(f.type, 'Finding'),
-    score: coalesce(f.conf, 0.5),
-    triples: [
-      'Image['+q.image_id+'] -HAS_FINDING-> Finding['+coalesce(f.id,'?')+']',
-      CASE WHEN loc_anatomy IS NOT NULL THEN 'Finding['+coalesce(f.id,'?')+'] -LOCATED_IN-> Anatomy['+coalesce(loc_anatomy.code,'?')+']' END,
-      CASE WHEN related_finding IS NOT NULL THEN 'Finding['+coalesce(f.id,'?')+'] -RELATED_TO-> Finding['+coalesce(related_finding.id,'?')+']' END
-    ]
-  } AS path
-  RETURN collect(path) AS finding_paths
+  WITH img, k_findings, collect(f) AS finding_list
+  CALL {
+    WITH img, k_findings, finding_list
+    WITH img AS img_local, k_findings AS k_local, finding_list AS list_local
+    WHERE k_local <= 0 OR size(list_local) = 0
+    WITH img_local AS img, list_local AS finding_list
+    RETURN [] AS finding_paths
+
+    UNION ALL
+
+    WITH img, k_findings, finding_list
+    WITH img AS img_local, k_findings AS k_local, finding_list AS list_local
+    WHERE k_local > 0 AND size(list_local) > 0
+    WITH img_local AS img, list_local[0..k_local - 1] AS limited
+    UNWIND limited AS f
+    MATCH base_path = (img)-[:HAS_FINDING]->(f)
+    CALL {
+      WITH f
+      OPTIONAL MATCH path = (f)-[:LOCATED_IN]->(:Anatomy)
+      RETURN collect(path) AS loc_paths
+    }
+    CALL {
+      WITH f
+      OPTIONAL MATCH path = (f)-[:RELATED_TO]->(:Finding)
+      RETURN collect(path) AS rel_paths
+    }
+    WITH f, base_path, loc_paths, rel_paths
+    WITH f, [base_path] + loc_paths + rel_paths AS raw_paths
+    WITH f,
+         [segment IN raw_paths WHERE segment IS NOT NULL |
+           [rel IN relationships(segment) |
+             {
+               source: {
+                 labels: labels(startNode(rel)),
+                 image_id: startNode(rel).image_id,
+                 id: startNode(rel).id,
+                 code: startNode(rel).code,
+                 name: startNode(rel).name,
+                 uid: startNode(rel).uid
+               },
+               rel: type(rel),
+               target: {
+                 labels: labels(endNode(rel)),
+                 image_id: endNode(rel).image_id,
+                 id: endNode(rel).id,
+                 code: endNode(rel).code,
+                 name: endNode(rel).name,
+                 uid: endNode(rel).uid
+               }
+             }
+           ]
+         ] AS segment_lists
+    WITH f, reduce(all_segments = [], seg_list IN segment_lists | all_segments + seg_list) AS segments
+    RETURN collect({
+      slot: 'findings',
+      label: coalesce(f.type, 'Finding'),
+      score: coalesce(f.conf, 0.5),
+      segments: segments
+    }) AS finding_paths
+  }
+  RETURN finding_paths
 }
 CALL {
-  WITH q, k_reports
-  OPTIONAL MATCH (q)-[:DESCRIBED_BY]->(r:Report)
-  WHERE r IS NOT NULL
-  WITH q, k_reports, r
+  WITH img, k_reports
+  OPTIONAL MATCH (img)-[:DESCRIBED_BY]->(r:Report)
+  WITH img, k_reports, r
   ORDER BY coalesce(r.conf, 0.0) DESC, r.id
-  WITH q, k_reports, collect(r) AS r_list
-  WITH q, k_reports,
-       CASE WHEN k_reports <= 0 THEN [] ELSE r_list[0..k_reports - 1] END AS trimmed
-  UNWIND trimmed AS r
-  OPTIONAL MATCH (r)-[:MENTIONS]->(mention)
-  WITH q, r,
-       head([node IN collect(DISTINCT mention) WHERE node IS NOT NULL]) AS mention_node
-  WITH q, r, mention_node,
-       CASE WHEN mention_node IS NULL THEN [] ELSE labels(mention_node) END AS mention_labels
-  WITH q, r, mention_node, mention_labels,
-       CASE
-         WHEN mention_node IS NULL THEN NULL
-         WHEN 'Finding' IN mention_labels THEN 'Report['+coalesce(r.id,'?')+'] -MENTIONS-> Finding['+coalesce(mention_node.id,'?')+']'
-         WHEN 'Anatomy' IN mention_labels THEN 'Report['+coalesce(r.id,'?')+'] -MENTIONS-> Anatomy['+coalesce(mention_node.code,'?')+']'
-         ELSE 'Report['+coalesce(r.id,'?')+'] -MENTIONS-> '+coalesce(head(mention_labels),'Entity')+'['+coalesce(toString(mention_node.id), toString(mention_node.code), toString(mention_node.name), '?')+']'
-       END AS mention_triple,
-       CASE WHEN mention_node IS NULL THEN 0.45 ELSE 0.55 END AS mention_boost
-  WITH {
-    slot: 'reports',
-    label: 'Report['+coalesce(r.id,'?')+']',
-    score: coalesce(r.conf, 0.4) * mention_boost,
-    triples: [
-      'Image['+q.image_id+'] -DESCRIBED_BY-> Report['+coalesce(r.id,'?')+']',
-      mention_triple
-    ]
-  } AS path
-  RETURN collect(path) AS report_paths
+  WITH img, k_reports, collect(r) AS report_list
+  CALL {
+    WITH img, k_reports, report_list
+    WITH img AS img_local, k_reports AS k_local, report_list AS list_local
+    WHERE k_local <= 0 OR size(list_local) = 0
+    WITH img_local AS img, list_local AS report_list
+    RETURN [] AS report_paths
+
+    UNION ALL
+
+    WITH img, k_reports, report_list
+    WITH img AS img_local, k_reports AS k_local, report_list AS list_local
+    WHERE k_local > 0 AND size(list_local) > 0
+    WITH img_local AS img, list_local[0..k_local - 1] AS limited
+    UNWIND limited AS r
+    MATCH base_path = (img)-[:DESCRIBED_BY]->(r)
+    CALL {
+      WITH r
+      OPTIONAL MATCH path = (r)-[:MENTIONS]->(m)
+      RETURN collect(path) AS mention_paths
+    }
+    WITH r, base_path, mention_paths
+    WITH r, [base_path] + mention_paths AS raw_paths
+    WITH r,
+         [segment IN raw_paths WHERE segment IS NOT NULL |
+           [rel IN relationships(segment) |
+             {
+               source: {
+                 labels: labels(startNode(rel)),
+                 image_id: startNode(rel).image_id,
+                 id: startNode(rel).id,
+                 code: startNode(rel).code,
+                 name: startNode(rel).name,
+                 uid: startNode(rel).uid
+               },
+               rel: type(rel),
+               target: {
+                 labels: labels(endNode(rel)),
+                 image_id: endNode(rel).image_id,
+                 id: endNode(rel).id,
+                 code: endNode(rel).code,
+                 name: endNode(rel).name,
+                 uid: endNode(rel).uid
+               }
+             }
+           ]
+         ] AS segment_lists
+    WITH r, reduce(all_segments = [], seg_list IN segment_lists | all_segments + seg_list) AS segments
+    RETURN collect({
+      slot: 'reports',
+      label: 'Report[' + coalesce(r.id, '?') + ']',
+      score: coalesce(r.conf, 0.0),
+      segments: segments
+    }) AS report_paths
+  }
+  RETURN report_paths
 }
 CALL {
-  WITH q, k_similarity, A, B
-  OPTIONAL MATCH (q)-[sim:SIMILAR_TO]->(s:Image)
-  WHERE sim IS NOT NULL AND s IS NOT NULL
-  WITH q, k_similarity, A, B, sim, s
+  WITH img, k_similarity
+  OPTIONAL MATCH (img)-[sim:SIMILAR_TO]->(s:Image)
+  WITH img, k_similarity, sim, s
   ORDER BY coalesce(sim.score, 0.0) DESC, s.image_id
-  WITH q, k_similarity, A, B, collect({rel: sim, img: s}) AS sim_list
-  WITH q, k_similarity, A, B,
-       CASE WHEN k_similarity <= 0 THEN [] ELSE sim_list[0..k_similarity - 1] END AS trimmed
-  UNWIND trimmed AS entry
-  WITH q, A, B, entry.rel AS sim_rel, entry.img AS sim_image
-  OPTIONAL MATCH (sim_image)-[:HAS_FINDING]->(sf:Finding)
-  OPTIONAL MATCH (sf)-[:LOCATED_IN]->(an:Anatomy)
-  OPTIONAL MATCH (sim_image)-[:DESCRIBED_BY]->(sr:Report)
-  WITH q, A, B, sim_rel, sim_image,
-       head([node IN collect(DISTINCT sf) WHERE node IS NOT NULL]) AS primary_finding,
-       head([node IN collect(DISTINCT an) WHERE node IS NOT NULL]) AS primary_anatomy,
-       head([node IN collect(DISTINCT sr) WHERE node IS NOT NULL]) AS primary_report
-  WITH q, sim_rel, sim_image, primary_finding, primary_anatomy, primary_report,
-       CASE WHEN primary_finding IS NULL THEN 0.5 ELSE coalesce(primary_finding.conf, 0.5) END AS finding_conf,
-       CASE WHEN primary_report IS NULL THEN 0.4 ELSE coalesce(primary_report.conf, 0.4) END AS report_conf,
-       A,
-       B
-  WITH {
-    slot: 'similarity',
-    label: 'Similar['+coalesce(sim_image.image_id,'?')+']',
-    score: coalesce(sim_rel.score, 0.0) * (A * finding_conf + B * report_conf),
-    triples: [
-      'Image['+q.image_id+'] -SIMILAR_TO-> Image['+coalesce(sim_image.image_id,'?')+']',
-      CASE WHEN primary_finding IS NOT NULL THEN 'Image['+coalesce(sim_image.image_id,'?')+'] -HAS_FINDING-> Finding['+coalesce(primary_finding.id,'?')+']' END,
-      CASE WHEN primary_anatomy IS NOT NULL THEN 'Finding['+coalesce(primary_finding.id,'?')+'] -LOCATED_IN-> Anatomy['+coalesce(primary_anatomy.code,'?')+']' END,
-      CASE WHEN primary_report IS NOT NULL THEN 'Image['+coalesce(sim_image.image_id,'?')+'] -DESCRIBED_BY-> Report['+coalesce(primary_report.id,'?')+']' END
-    ]
-  } AS path
-  RETURN collect(path) AS similarity_paths
+  WITH img, k_similarity, collect({rel: sim, img: s}) AS sim_list
+  CALL {
+    WITH img, k_similarity, sim_list
+    WITH img AS img_local, k_similarity AS k_local, sim_list AS list_local
+    WHERE k_local <= 0 OR size(list_local) = 0
+    WITH img_local AS img, list_local AS sim_list
+    RETURN [] AS similarity_paths
+
+    UNION ALL
+
+    WITH img, k_similarity, sim_list
+    WITH img AS img_local, k_similarity AS k_local, sim_list AS list_local
+    WHERE k_local > 0 AND size(list_local) > 0
+    WITH img_local AS img, list_local[0..k_local - 1] AS limited
+    UNWIND limited AS entry
+    WITH img, entry.img AS sim_img, entry.rel AS sim_rel
+    MATCH base_path = (img)-[:SIMILAR_TO]->(sim_img)
+    CALL {
+      WITH sim_img
+      OPTIONAL MATCH path = (sim_img)-[:DESCRIBED_BY]->(:Report)
+      RETURN collect(path) AS report_paths
+    }
+    WITH sim_img, sim_rel, base_path, report_paths
+    WITH sim_img, sim_rel, [base_path] + report_paths AS raw_paths
+    WITH sim_img, sim_rel,
+         [segment IN raw_paths WHERE segment IS NOT NULL |
+           [rel IN relationships(segment) |
+             {
+               source: {
+                 labels: labels(startNode(rel)),
+                 image_id: startNode(rel).image_id,
+                 id: startNode(rel).id,
+                 code: startNode(rel).code,
+                 name: startNode(rel).name,
+                 uid: startNode(rel).uid
+               },
+               rel: type(rel),
+               target: {
+                 labels: labels(endNode(rel)),
+                 image_id: endNode(rel).image_id,
+                 id: endNode(rel).id,
+                 code: endNode(rel).code,
+                 name: endNode(rel).name,
+                 uid: endNode(rel).uid
+               }
+             }
+           ]
+         ] AS segment_lists
+    WITH sim_img, sim_rel, reduce(all_segments = [], seg_list IN segment_lists | all_segments + seg_list) AS segments
+    RETURN collect({
+      slot: 'similarity',
+      label: 'Similar[' + coalesce(sim_img.image_id, '?') + ']',
+      score: coalesce(sim_rel.score, 0.0),
+      segments: segments
+    }) AS similarity_paths
+  }
+  RETURN similarity_paths
 }
-WITH finding_paths + report_paths + similarity_paths AS raw_paths
-UNWIND raw_paths AS path
-WITH path
-WHERE any(triple IN path.triples WHERE triple IS NOT NULL)
-WITH path
-ORDER BY path.score DESC
-RETURN collect({
-  slot: path.slot,
-  label: path.label,
-  triples: [triple IN path.triples WHERE triple IS NOT NULL],
-  score: path.score
-}) AS paths;
+WITH coalesce(finding_paths, []) + coalesce(report_paths, []) + coalesce(similarity_paths, []) AS raw_paths
+RETURN raw_paths AS paths;
 """
 
 SIMILARITY_CANDIDATES_QUERY = """
@@ -433,6 +513,83 @@ class GraphRepo:
                 logger.exception("Neo4j read query failed: %s params=%s", query.strip().splitlines()[0], parameters)
                 raise
 
+    @staticmethod
+    def _node_token(node: Any) -> str:
+        if not isinstance(node, dict):
+            return "Node[?]"
+        labels = [str(label) for label in (node.get("labels") or []) if label]
+        primary = next((label for label in _NODE_LABEL_PRIORITY if label in labels), None)
+        if not primary:
+            primary = labels[0] if labels else "Node"
+        identifier: Optional[Any] = None
+        for key in ("image_id", "id", "code", "name", "uid", "label"):
+            value = node.get(key)
+            if value not in (None, ""):
+                identifier = value
+                break
+        if identifier is None:
+            fallback = node.get("value") or node.get("external_id")
+            if fallback not in (None, ""):
+                identifier = fallback
+        if identifier is None:
+            identifier = "?"
+        return f"{primary}[{identifier}]"
+
+    @classmethod
+    def _segments_to_triples(cls, segments: Any) -> List[str]:
+        triples: List[str] = []
+        if not isinstance(segments, list):
+            return triples
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            rel_type_raw = segment.get("rel") or segment.get("rel_type") or segment.get("type")
+            if not rel_type_raw:
+                continue
+            rel_type = str(rel_type_raw)
+            source = cls._node_token(segment.get("source"))
+            target = cls._node_token(segment.get("target"))
+            triples.append(f"{source} -{rel_type}-> {target}")
+        return triples
+
+    @classmethod
+    def _normalise_path_row(cls, row: Any) -> Dict[str, Any]:
+        payload = row if isinstance(row, dict) else {}
+        triples_raw = payload.get("triples")
+        if isinstance(triples_raw, list):
+            triples = [str(item) for item in triples_raw if item]
+        else:
+            triples = cls._segments_to_triples(payload.get("segments"))
+        return {
+            "slot": payload.get("slot"),
+            "label": payload.get("label"),
+            "score": payload.get("score"),
+            "triples": triples,
+        }
+
+    @staticmethod
+    def _ensure_canonical_field(
+        value: Any,
+        index: int,
+        *,
+        field: str,
+        resolver,
+    ) -> None:
+        if value is None:
+            return
+        if not isinstance(value, str):
+            raise ValueError(f"finding[{index}].{field} must be a string")
+        canonical_value, _ = resolver(value)
+        if canonical_value and canonical_value != value:
+            raise ValueError(
+                f"finding[{index}].{field} must be canonical (expected '{canonical_value}', got '{value}')"
+            )
+
+    @classmethod
+    def _validate_canonical_finding(cls, finding: Dict[str, Any], index: int) -> None:
+        cls._ensure_canonical_field(finding.get("type"), index, field="type", resolver=canonicalise_label)
+        cls._ensure_canonical_field(finding.get("location"), index, field="location", resolver=canonicalise_location)
+
     def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = deepcopy(payload)
 
@@ -467,12 +624,13 @@ class GraphRepo:
         data["report"] = report
 
         findings = []
-        for finding in data.get("findings") or []:
+        for idx, finding in enumerate(data.get("findings") or []):
             finding_dict = dict(finding)
             if finding_dict.get("conf") is not None:
                 finding_dict["conf"] = float(finding_dict["conf"])
             if finding_dict.get("size_cm") is not None:
                 finding_dict["size_cm"] = float(finding_dict["size_cm"])
+            self._validate_canonical_finding(finding_dict, idx)
             findings.append(finding_dict)
         data["findings"] = findings
 
@@ -569,16 +727,23 @@ class GraphRepo:
         params = {
             "image_id": image_id,
             "k": k_value,
-            "alpha_finding": PATH_SCORE_ALPHA_FINDING if alpha_finding is None else alpha_finding,
-            "beta_report": PATH_SCORE_BETA_REPORT if beta_report is None else beta_report,
             "k_findings": _slot_value("findings"),
             "k_reports": _slot_value("reports"),
             "k_similarity": _slot_value("similarity"),
         }
-        records = self._run_read(TOPK_PATHS_QUERY, params)
+        records = self._run_read(GRAPH_PATHS_QUERY, params)
         if not records:
             return []
-        return list(records[0]["paths"] or [])
+        first_row = records[0] if isinstance(records[0], dict) else {}
+        raw_paths = first_row.get("paths") if isinstance(first_row, dict) else None
+        if not raw_paths:
+            return []
+        normalised: List[Dict[str, Any]] = []
+        for entry in raw_paths:
+            if entry is None:
+                continue
+            normalised.append(self._normalise_path_row(entry))
+        return normalised
 
     def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
         """Return finding IDs currently attached to the image."""

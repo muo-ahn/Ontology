@@ -270,6 +270,7 @@ def compute_consensus(
             anchor_mode_used = True
             agreement_score = max(agreement_score, anchor_min_score)
 
+    consensus_text: Optional[str] = None
     if supporting_modes:
         conflicted = [mode for mode in supporting_modes if available[mode].get("penalty", 0.0) < 0]
         if conflicted:
@@ -280,6 +281,25 @@ def compute_consensus(
 
     notes: Optional[str] = None
     if supporting_modes:
+        supporting_modes = sorted(
+            dict.fromkeys(supporting_modes),
+            key=lambda mode: CONSENSUS_MODE_PRIORITY.index(mode)
+            if mode in CONSENSUS_MODE_PRIORITY
+            else len(CONSENSUS_MODE_PRIORITY),
+        )
+        preferred = _preferred_mode(supporting_modes) or supporting_modes[0]
+        consensus_text = available[preferred]["text"]
+        consensus_norm = available[preferred]["normalised"]
+        for mode, data in available.items():
+            if mode in supporting_modes or data.get("degraded"):
+                continue
+            if not consensus_norm:
+                continue
+            similarity = _jaccard_similarity(consensus_norm, data["normalised"])
+            structured_overlap = data.get("structured_overlap", 0.0)
+            if similarity >= fallback_threshold or structured_overlap >= 0.5:
+                supporting_modes.append(mode)
+
         preferred = _preferred_mode(supporting_modes) or supporting_modes[0]
         consensus_text = available[preferred]["text"]
         status = "agree"
@@ -309,8 +329,27 @@ def compute_consensus(
             penalty_note = f"{penalty_note} | {penalty_detail}" if penalty_note else penalty_detail
             confidence = "very_low"
 
-    disagreed_modes = sorted(set(available.keys()) - set(supporting_modes))
+    supporting_set = set(supporting_modes)
+    disagreed_modes = sorted(set(available.keys()) - supporting_set)
     degraded_inputs = sorted(mode for mode, data in available.items() if data.get("degraded"))
+    total_modes = len(available)
+    support_count = len(supporting_set)
+    vote_summary = {
+        "support": support_count,
+        "against": total_modes - support_count,
+        "total": total_modes,
+    }
+    support_ratio = (support_count / total_modes) if total_modes else 0.0
+    if status == "agree":
+        if support_ratio >= 0.95 and agreement_score >= CONSENSUS_HIGH_CONFIDENCE_THRESHOLD:
+            confidence = "high"
+        elif support_ratio >= 2 / 3 and confidence == "medium" and agreement_score >= fallback_threshold:
+            confidence = "medium"
+        elif support_ratio < 0.5:
+            confidence = "low"
+        elif support_ratio < 2 / 3 and confidence == "high":
+            confidence = "medium"
+
     presented_text = consensus_text if status != "disagree" else f"낮은 확신: {consensus_text}"
 
     consensus_payload: Dict[str, Any] = {
@@ -323,6 +362,8 @@ def compute_consensus(
         "confidence": confidence,
         "evaluated_modes": sorted(available.keys()),
     }
+    if total_modes:
+        consensus_payload["vote_summary"] = vote_summary
     if degraded_inputs:
         consensus_payload["degraded_inputs"] = degraded_inputs
     all_notes: List[str] = []
@@ -338,6 +379,8 @@ def compute_consensus(
             all_notes.append("structured finding terms aligned across agreeing modes")
         if graph_signal > 0 and ("VGL" in supporting_modes or best_pair_graph_bonus):
             all_notes.append(f"graph evidence boosted consensus (paths_signal={graph_signal:.2f})")
+        if support_ratio < 2 / 3:
+            all_notes.append("limited mode agreement (<2/3)")
     if penalised_modes and status != "disagree" and not penalty_note:
         all_notes.append("penalty applied for modality conflict")
     if all_notes:
