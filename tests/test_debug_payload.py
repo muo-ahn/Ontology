@@ -48,6 +48,7 @@ def test_builder_context_marks_graph_degrade():
         fallback_used=True,
         fallback_reason="no_graph_paths",
         no_graph_evidence=True,
+        notes=["slot rebalance"],
     )
     payload = builder.payload()
     assert payload["graph_degraded"] is True
@@ -56,6 +57,7 @@ def test_builder_context_marks_graph_degrade():
     assert payload["context_fallback_used"] is True
     assert payload["context_fallback_reason"] == "no_graph_paths"
     assert payload["context_no_graph_evidence"] is True
+    assert "slot rebalance" in payload.get("context_notes", [])
 
 
 def test_builder_disabled_no_payload():

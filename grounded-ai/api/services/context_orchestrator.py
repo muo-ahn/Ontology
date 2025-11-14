@@ -36,6 +36,7 @@ class ContextResult:
     no_graph_evidence: bool
     fallback_used: bool
     fallback_reason: Optional[str]
+    slot_rebalanced: bool
 
 
 class ContextOrchestrator:
@@ -65,7 +66,7 @@ class ContextOrchestrator:
         findings_list = _extract_findings(facts)
         paths_list = list(context_data.paths or [])
         ctx_paths_total = _count_triples(paths_list)
-        _ensure_findings_slot_allocation(bundle, len(paths_list))
+        slot_rebalanced = _ensure_findings_slot_allocation(bundle, len(paths_list))
 
         graph_paths_strength = _graph_paths_strength(len(paths_list), ctx_paths_total)
         no_graph_evidence = len(paths_list) == 0
@@ -86,6 +87,7 @@ class ContextOrchestrator:
             no_graph_evidence=no_graph_evidence,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
+            slot_rebalanced=slot_rebalanced or bool((_safe_dict(bundle.get("slot_meta"))).get("retried_findings")),
         )
 
 
@@ -117,24 +119,35 @@ def _count_triples(paths: List[Dict[str, Any]]) -> int:
     return total
 
 
-def _ensure_findings_slot_allocation(bundle: Dict[str, Any], minimum: int) -> None:
+def _ensure_findings_slot_allocation(bundle: Dict[str, Any], minimum: int) -> bool:
     if minimum <= 0:
-        return
+        return False
     slot_limits = bundle.get("slot_limits")
+    initial_value = 0
     if not isinstance(slot_limits, dict):
         slot_limits = {"findings": minimum, "reports": 0, "similarity": 0}
         bundle["slot_limits"] = slot_limits
+        changed = True
     else:
-        slot_limits["findings"] = max(int(slot_limits.get("findings", 0)), minimum)
+        initial_value = int(slot_limits.get("findings", 0))
+        new_value = max(initial_value, minimum)
+        changed = new_value != initial_value
+        slot_limits["findings"] = new_value
     slot_meta = bundle.get("slot_meta")
+    if not isinstance(slot_meta, dict):
+        slot_meta = {"slot_source": "auto"}
+        bundle["slot_meta"] = slot_meta
+    if "finding_slot_initial" not in slot_meta:
+        slot_meta["finding_slot_initial"] = initial_value
+    slot_meta["finding_slot_final"] = slot_limits.get("findings", minimum)
     try:
         allocated_total = sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity"))
     except Exception:
         allocated_total = minimum
-    if isinstance(slot_meta, dict):
-        slot_meta["allocated_total"] = max(int(slot_meta.get("allocated_total", 0)), allocated_total)
-    else:
-        bundle["slot_meta"] = {"allocated_total": allocated_total, "slot_source": "auto"}
+    slot_meta["allocated_total"] = max(int(slot_meta.get("allocated_total", 0)), allocated_total)
+    if changed:
+        slot_meta["retried_findings"] = True
+    return changed
 
 
 __all__ = [

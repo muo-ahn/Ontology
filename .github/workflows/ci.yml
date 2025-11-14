@@ -28,11 +28,18 @@ jobs:
 
       - name: Run targeted pytest suite
         env:
-          PYTHONPATH: grounded-ai
+          PYTHONPATH: grounded-ai/api
         run: |
           pytest \
             tests/test_image_identity.py \
             tests/test_context_orchestrator.py \
             tests/test_consensus_snapshot.py \
             tests/test_debug_payload.py \
+            tests/test_paths_and_analyze.py \
             -q
+
+      - name: Slot rebalance smoke test
+        env:
+          PYTHONPATH: grounded-ai/api
+        run: |
+          pytest tests/test_paths_and_analyze.py -k slot_rebalance -q

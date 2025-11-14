@@ -155,3 +155,93 @@ def test_context_orchestrator_marks_no_graph_evidence_when_everything_empty() ->
     )
     assert result.no_graph_evidence
     assert result.graph_paths_strength == 0
+
+
+def test_context_orchestrator_preserves_summary_rows_and_paths() -> None:
+    summary = ["[EDGE SUMMARY]", "HAS_FINDING: cnt=1, avg_conf=0.90"]
+    summary_rows = [{"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.9}]
+    path = {
+        "slot": "findings",
+        "triples": ["Image[IMG900] -HAS_FINDING-> Finding[CTX_F1]", "Finding[CTX_F1] -LOCATED_IN-> Anatomy[Liver]"],
+        "score": 0.95,
+    }
+    bundle = {
+        "summary": summary,
+        "summary_rows": summary_rows,
+        "facts": {"image_id": "IMG900", "findings": [{"id": "CTX_F1", "type": "mass"}]},
+        "paths": [path],
+    }
+    orchestrator = ContextOrchestrator(_FakeBuilder(bundle))
+    result = orchestrator.build(
+        image_id="IMG900",
+        normalized_findings=[],
+        graph_degraded=False,
+        limits=_limits(k_paths=2),
+    )
+    assert result.bundle["summary"] == summary
+    assert result.bundle["summary_rows"] == summary_rows
+    assert result.findings == [{"id": "CTX_F1", "type": "mass"}]
+    assert result.paths == [path]
+    assert result.path_triple_total == len(path["triples"])
+
+
+def test_context_orchestrator_expands_finding_slot_limits_for_existing_paths() -> None:
+    bundle = {
+        "facts": {"image_id": "IMG777", "findings": []},
+        "paths": [
+            {"slot": "findings", "triples": ["Image -HAS_FINDING-> Finding[F1]"], "score": 0.9},
+            {"slot": "findings", "triples": ["Image -HAS_FINDING-> Finding[F2]"], "score": 0.85},
+        ],
+        "slot_limits": {"findings": 0, "reports": 0, "similarity": 0},
+        "slot_meta": {"allocated_total": 0, "slot_source": "auto", "requested_k": 2, "applied_k": 2, "requested_overrides": {}},
+    }
+    orchestrator = ContextOrchestrator(_FakeBuilder(bundle))
+    result = orchestrator.build(
+        image_id="IMG777",
+        normalized_findings=[],
+        graph_degraded=False,
+        limits=_limits(k_paths=2),
+    )
+    slot_limits = result.bundle["slot_limits"]
+    assert slot_limits["findings"] >= 2
+    assert result.bundle["slot_meta"]["allocated_total"] >= 2
+
+
+def test_context_orchestrator_rebalances_when_slot_limits_zero() -> None:
+    bundle = {
+        "facts": {"image_id": "IMG401", "findings": []},
+        "paths": [
+            {"label": "Finding F1", "triples": ["Image -HAS_FINDING-> Finding[F1]"], "score": 0.9},
+        ],
+        "slot_limits": {"findings": 0, "reports": 0, "similarity": 0},
+        "slot_meta": {"allocated_total": 0, "slot_source": "auto", "requested_k": 0, "applied_k": 0, "requested_overrides": {}},
+    }
+    orchestrator = ContextOrchestrator(_FakeBuilder(bundle))
+    result = orchestrator.build(
+        image_id="IMG401",
+        normalized_findings=[],
+        graph_degraded=False,
+        limits=_limits(k_paths=0),
+    )
+    slot_limits = result.bundle["slot_limits"]
+    slot_meta = result.bundle.get("slot_meta", {})
+    assert slot_limits["findings"] >= 1
+    assert slot_meta.get("retried_findings") is True
+    assert result.slot_rebalanced is True
+
+
+def test_context_orchestrator_leaves_slot_meta_when_no_rebalance() -> None:
+    bundle = _context(
+        findings=[{"id": "F9"}],
+        paths=[{"slot": "findings", "triples": ["Image -HAS_FINDING-> Finding[F9]"], "score": 0.8}],
+    )
+    orchestrator = ContextOrchestrator(_FakeBuilder(bundle))
+    result = orchestrator.build(
+        image_id="IMG555",
+        normalized_findings=[],
+        graph_degraded=False,
+        limits=_limits(),
+    )
+    slot_meta = result.bundle.get("slot_meta", {})
+    assert slot_meta.get("retried_findings") is not True
+    assert result.slot_rebalanced is False

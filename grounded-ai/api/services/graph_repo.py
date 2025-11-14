@@ -412,7 +412,9 @@ class GraphRepo:
                 result = tx.run(query, parameters)
                 return [record.data() for record in result]
 
-            return session.execute_write(_work)
+            if hasattr(session, "execute_write"):
+                return session.execute_write(_work)
+            return session.write_transaction(_work)
 
     def _run_read(self, query: str, parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not self._driver:
@@ -424,7 +426,9 @@ class GraphRepo:
                 return payload
 
             try:
-                return session.execute_read(_work)
+                if hasattr(session, "execute_read"):
+                    return session.execute_read(_work)
+                return session.read_transaction(_work)
             except Exception:
                 logger.exception("Neo4j read query failed: %s params=%s", query.strip().splitlines()[0], parameters)
                 raise
@@ -521,6 +525,8 @@ class GraphRepo:
         if hasattr(self._driver, "execute_write"):
             return self._driver.execute_write(_tx_fn)
         with self._driver.session(database=self._database) as session:
+            if hasattr(session, "execute_write"):
+                return session.execute_write(_tx_fn)
             return session.write_transaction(_tx_fn)
 
     def query_bundle(self, image_id: str) -> Dict[str, Any]:

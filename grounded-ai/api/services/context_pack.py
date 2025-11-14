@@ -168,11 +168,19 @@ def _cap_slots(slots: Dict[str, int], limit: int) -> Dict[str, int]:
     return capped
 
 
-def _resolve_path_slots(total: int, explicit: Optional[Dict[str, int]] = None) -> Dict[str, int]:
+def _resolve_path_slots(
+    total: int,
+    explicit: Optional[Dict[str, int]] = None,
+    *,
+    min_findings_floor: int = 0,
+) -> Dict[str, int]:
     total_budget = max(int(total), 0)
     explicit_clean = _sanitise_slot_values(explicit)
     if explicit_clean:
-        return _cap_slots(explicit_clean, total_budget)
+        slots = _cap_slots(explicit_clean, total_budget)
+        floor_value = min_findings_floor if total_budget > 0 else 0
+        ensured, _ = _ensure_finding_slot_floor(slots, floor_value)
+        return ensured
 
     slots = {key: 0 for key in _PATH_SLOT_KEYS}
     if total_budget == 0:
@@ -198,32 +206,39 @@ def _resolve_path_slots(total: int, explicit: Optional[Dict[str, int]] = None) -
         remaining -= 1
         idx += 1
 
-    return slots
+    ensured, _ = _ensure_finding_slot_floor(slots, min_findings_floor if total_budget > 0 else 0)
+    return ensured
 
 
-def _ensure_finding_slot_floor(slots: Dict[str, int], min_required: int) -> Dict[str, int]:
+def _ensure_finding_slot_floor(slots: Dict[str, int], min_required: int) -> tuple[Dict[str, int], bool]:
     """Guarantee that the findings slot keeps a non-zero allocation when findings exist."""
     normalised = {key: max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS}
     required = max(int(min_required), 0)
-    if required == 0 or normalised.get("findings", 0) >= required:
-        return normalised
+    current = normalised.get("findings", 0)
+    if required == 0 or current >= required:
+        return normalised, False
 
-    deficit = required - normalised.get("findings", 0)
+    changed = False
+    deficit = required - current
     donors = ("similarity", "reports")
     for donor in donors:
         available = normalised.get(donor, 0)
         if available <= 0:
             continue
         take = min(available, deficit)
+        if take <= 0:
+            continue
         normalised[donor] = available - take
         normalised["findings"] = normalised.get("findings", 0) + take
         deficit -= take
+        changed = True
         if deficit <= 0:
             break
 
     if deficit > 0:
         normalised["findings"] = normalised.get("findings", 0) + deficit
-    return normalised
+        changed = True
+    return normalised, changed
 
 
 def _dedupe_path_rows(paths: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -254,10 +269,11 @@ def _rebalance_slot_limits(
     paths: Sequence[Dict[str, Any]],
     *,
     findings_floor: int = 0,
-) -> Dict[str, int]:
+) -> tuple[Dict[str, int], bool]:
     total = sum(max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS)
     if total <= 0:
-        return _ensure_finding_slot_floor(slots, findings_floor)
+        ensured, changed = _ensure_finding_slot_floor(slots, findings_floor)
+        return ensured, changed
 
     counts: Dict[str, int] = {key: 0 for key in _PATH_SLOT_KEYS}
     for row in paths:
@@ -304,7 +320,9 @@ def _rebalance_slot_limits(
         remaining -= 1
         idx += 1
 
-    return _ensure_finding_slot_floor(rebalanced, findings_floor)
+    ensured, floor_changed = _ensure_finding_slot_floor(rebalanced, findings_floor)
+    changed = ensured != {key: max(int(slots.get(key, 0)), 0) for key in _PATH_SLOT_KEYS} or floor_changed
+    return ensured, changed
 
 
 def _extract_relation(token: str) -> Optional[str]:
@@ -473,7 +491,7 @@ class GraphContextBuilder:
 
         current_k = requested_k
         slot_overrides = dict(k_slots or {})
-        findings_floor = 1 if len(facts.findings) > 0 else 0
+        findings_floor = 1
 
         def _render(
             current_paths: Sequence[Dict[str, Any]],
@@ -501,10 +519,19 @@ class GraphContextBuilder:
         paths_rows: Sequence[Dict[str, Any]] = []
         rendered_bundle: Dict[str, Any] = {}
         final_slot_limits: Dict[str, int] = {}
-        slot_limits = _ensure_finding_slot_floor(
-            _resolve_path_slots(current_k, slot_overrides),
+        retried_findings = False
+        slot_limits_raw = _resolve_path_slots(
+            current_k,
+            slot_overrides,
+            min_findings_floor=findings_floor,
+        )
+        initial_finding_request = slot_limits_raw.get("findings", 0)
+        slot_limits, floor_changed = _ensure_finding_slot_floor(
+            slot_limits_raw,
             findings_floor,
         )
+        if floor_changed:
+            retried_findings = True
         attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
         deduped_rows: List[Dict[str, Any]] = []
         while True:
@@ -529,11 +556,13 @@ class GraphContextBuilder:
                 and desired_paths > 0
                 and len(paths_rows) < desired_paths
             ):
-                rebalanced = _rebalance_slot_limits(
+                rebalanced, changed = _rebalance_slot_limits(
                     slot_limits,
                     paths_rows,
                     findings_floor=findings_floor,
                 )
+                if changed:
+                    retried_findings = True
                 if rebalanced != slot_limits:
                     slot_limits = rebalanced
                     continue
@@ -542,10 +571,17 @@ class GraphContextBuilder:
             triples_text = rendered["triples_text"]
             if max_chars and max_chars > 0 and len(triples_text) > max_chars and current_k > 0:
                 current_k -= 1
-                slot_limits = _ensure_finding_slot_floor(
-                    _resolve_path_slots(current_k, slot_overrides),
+                new_slot_limits_raw = _resolve_path_slots(
+                    current_k,
+                    slot_overrides,
+                    min_findings_floor=findings_floor,
+                )
+                slot_limits, floor_changed = _ensure_finding_slot_floor(
+                    new_slot_limits_raw,
                     findings_floor,
                 )
+                if floor_changed:
+                    retried_findings = True
                 attempted_slot_configs.clear()
                 continue
 
@@ -580,7 +616,11 @@ class GraphContextBuilder:
             "slot_source": "overrides" if slot_overrides_clean else "auto",
             "requested_overrides": slot_overrides_clean,
             "allocated_total": sum(max(int(final_slot_limits.get(key, 0)), 0) for key in _PATH_SLOT_KEYS),
+            "finding_slot_initial": initial_finding_request,
+            "finding_slot_final": final_slot_limits.get("findings", 0),
         }
+        if retried_findings:
+            slot_meta["retried_findings"] = True
         if slot_overrides and slot_overrides_clean != slot_overrides:
             slot_meta["requested_overrides_raw"] = slot_overrides
 
@@ -692,10 +732,15 @@ class ContextPackBuilder:
         summary_rows = bundle_payload.get("summary", [])
         facts_payload = bundle_payload.get("facts", {"image_id": image_id, "findings": []})
         facts = ContextFacts(**facts_payload)
-        findings_floor = 1 if len(facts.findings) > 0 else 0
+        findings_floor = 1
 
-        slot_limits = _ensure_finding_slot_floor(
-            _resolve_path_slots(k_value, k_slots),
+        slot_limits_raw = _resolve_path_slots(
+            k_value,
+            k_slots,
+            min_findings_floor=findings_floor,
+        )
+        slot_limits, _ = _ensure_finding_slot_floor(
+            slot_limits_raw,
             findings_floor,
         )
         attempted_slot_configs: set[tuple[tuple[str, int], ...]] = set()
@@ -724,7 +769,7 @@ class ContextPackBuilder:
                 and desired_paths > 0
                 and len(deduped_rows) < desired_paths
             ):
-                rebalanced = _rebalance_slot_limits(
+                rebalanced, _ = _rebalance_slot_limits(
                     slot_limits,
                     deduped_rows,
                     findings_floor=findings_floor,

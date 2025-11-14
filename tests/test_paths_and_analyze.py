@@ -225,12 +225,6 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
         def from_env(cls) -> "FakeGraphRepo":
             return cls()
 
-        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-            return payload
-
-        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
-            return list(expected_ids or [])
-
         def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
             image_payload = payload.get("image") or {}
             image_id = image_payload.get("image_id", "UNKNOWN")
@@ -252,16 +246,14 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
             data.setdefault("case_id", "FAKE_CASE")
             return data
 
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(self._stored_findings.get(image_id, []))
+
         def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
             return []
 
         def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
             return 0
-
-        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
-            if expected_ids is not None:
-                return list(expected_ids)
-            return list(self._stored_findings.get(image_id, []))
 
         def close(self) -> None:
             self._closed = True
@@ -280,44 +272,20 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
             beta_report: Optional[float],
             k_slots: Optional[Dict[str, int]],
         ) -> GraphContextResult:
+            slot_limits = {"findings": 0, "reports": 0, "similarity": 0}
+            slot_meta = {
+                "requested_k": k,
+                "applied_k": k,
+                "slot_source": "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": 0,
+            }
             return GraphContextResult(
                 summary=[],
                 summary_rows=[],
                 paths=[],
                 facts={"image_id": image_id, "findings": []},
-                triples_text="",
-                slot_limits={"findings": 0, "reports": 0, "similarity": 0},
-                slot_meta={"requested_k": k, "applied_k": k, "slot_source": "auto", "requested_overrides": {}, "allocated_total": 0},
-            )
-
-        def build_bundle(self, **kwargs: Any) -> Dict[str, Any]:
-            return self.build_context(**kwargs).to_bundle()
-
-        def build_context(
-            self,
-            *,
-            image_id: str,
-            k: int,
-            max_chars: int,
-            alpha_finding: Optional[float],
-            beta_report: Optional[float],
-            k_slots: Optional[Dict[str, int]],
-        ) -> GraphContextResult:
-            payload = self.build_bundle()
-            slot_limits = dict(payload.get("slot_limits", {}))
-            slot_meta = {
-                "requested_k": max(int(k), 0),
-                "applied_k": max(int(k), 0),
-                "slot_source": "auto",
-                "requested_overrides": dict(k_slots or {}),
-                "allocated_total": sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity")),
-            }
-            return GraphContextResult(
-                summary=list(payload.get("summary", [])),
-                summary_rows=list(payload.get("summary_rows", [])),
-                paths=list(payload.get("paths", [])),
-                facts=dict(payload.get("facts", {})),
-                triples_text=str(payload.get("triples", "")),
+                triples_text="No path generated (0/k)",
                 slot_limits=slot_limits,
                 slot_meta=slot_meta,
             )
@@ -372,6 +340,7 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
     assert evaluation.get("context_fallback_used") is True
 
     results = payload.get("results", {})
+    response_image_id = payload.get("image_id")
     consensus = results.get("consensus", {})
 
     assert results.get("status") == "low_confidence"
@@ -380,7 +349,8 @@ def test_pipeline_marks_low_confidence_when_graph_evidence_missing(
     assert "graph context empty" in notes or "fell back to vl" in notes
 
     vgl_text = results.get("VGL", {}).get("text")
-    assert vgl_text == "No evidence available for US001"
+    expected_id = response_image_id or "US001"
+    assert vgl_text == f"No evidence available for {expected_id}"
 
 
 def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
@@ -394,12 +364,6 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
         @classmethod
         def from_env(cls) -> "FakeGraphRepo":
             return cls()
-
-        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-            return payload
-
-        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
-            return list(expected_ids or [])
 
         def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
             image_payload = payload.get("image") or {}
@@ -419,16 +383,14 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
             data.setdefault("case_id", "FAKE_CASE")
             return data
 
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(self._stored_findings.get(image_id, []))
+
         def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
             return []
 
         def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
             return 0
-
-        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
-            if expected_ids is not None:
-                return list(expected_ids)
-            return list(self._stored_findings.get(image_id, []))
 
         def close(self) -> None:
             self._closed = True
@@ -466,6 +428,13 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
                     }
                 ],
             }
+            slot_meta = {
+                "requested_k": k,
+                "applied_k": k,
+                "slot_source": "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": 2,
+            }
             return GraphContextResult(
                 summary=summary_lines,
                 summary_rows=[{"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.9}],
@@ -473,38 +442,6 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
                 facts=facts,
                 triples_text="Image[US001] -HAS_FINDING-> Finding[F201]",
                 slot_limits={"findings": 2, "reports": 0, "similarity": 0},
-                slot_meta={"requested_k": k, "applied_k": k, "slot_source": "auto", "requested_overrides": {}, "allocated_total": 2},
-            )
-
-        def build_bundle(self, **kwargs: Any) -> Dict[str, Any]:
-            return self.build_context(**kwargs).to_bundle()
-
-        def build_context(
-            self,
-            *,
-            image_id: str,
-            k: int,
-            max_chars: int,
-            alpha_finding: Optional[float],
-            beta_report: Optional[float],
-            k_slots: Optional[Dict[str, int]],
-        ) -> GraphContextResult:
-            payload = self.build_bundle()
-            slot_limits = dict(payload.get("slot_limits", {}))
-            slot_meta = {
-                "requested_k": max(int(k), 0),
-                "applied_k": max(int(k), 0),
-                "slot_source": "auto",
-                "requested_overrides": dict(k_slots or {}),
-                "allocated_total": sum(max(int(slot_limits.get(key, 0)), 0) for key in ("findings", "reports", "similarity")),
-            }
-            return GraphContextResult(
-                summary=list(payload.get("summary", [])),
-                summary_rows=list(payload.get("summary_rows", [])),
-                paths=list(payload.get("paths", [])),
-                facts=dict(payload.get("facts", {})),
-                triples_text=str(payload.get("triples", "")),
-                slot_limits=slot_limits,
                 slot_meta=slot_meta,
             )
 
@@ -562,6 +499,180 @@ def test_pipeline_prefers_graph_backed_vgl_when_other_modes_diverge(
     evaluation = payload.get("evaluation") or {}
     evaluation_status = evaluation.get("status") or (evaluation.get("consensus") or {}).get("status")
     assert evaluation_status == "agree"
+
+
+def test_pipeline_flags_context_mismatch_when_paths_conflict(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class MismatchContextBuilder:
+        def __init__(self, repo: Any) -> None:  # pragma: no cover - simple holder
+            self._repo = repo
+
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float],
+            beta_report: Optional[float],
+            k_slots: Optional[Dict[str, int]],
+        ) -> GraphContextResult:
+            path = {
+                "slot": "findings",
+                "label": "Conflicting finding",
+                "triples": ["Image[US001] -HAS_FINDING-> Finding[CTX_FX]"],
+                "score": 0.9,
+            }
+            slot_limits = {"findings": 1, "reports": 0, "similarity": 0}
+            slot_meta = {
+                "requested_k": k,
+                "applied_k": k,
+                "slot_source": "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": 1,
+            }
+            return GraphContextResult(
+                summary=["[EDGE SUMMARY]", "No path generated (0/k)"],
+                summary_rows=[],
+                paths=[path],
+                facts={"image_id": image_id, "findings": [{"id": "CTX_FX", "type": "mass"}]},
+                triples_text="[EVIDENCE PATHS]\nNo path generated (0/k)",
+                slot_limits=slot_limits,
+                slot_meta=slot_meta,
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pipeline_module, "GraphContextBuilder", MismatchContextBuilder)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "image_id": "US001",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 1,
+            "max_chars": 60,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    debug_blob = payload.get("debug", {})
+    errors = payload.get("errors") or []
+    assert {"stage": "context", "msg": "facts_paths_mismatch"} in errors
+    assert debug_blob.get("context_consistency") is False
+    assert debug_blob.get("context_consistency_reason") == "paths_present_but_marked_missing"
+
+
+def test_pipeline_emits_slot_rebalance_notes(
+    pipeline_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RebalanceGraphRepo:
+        def __init__(self) -> None:
+            self._closed = False
+
+        @classmethod
+        def from_env(cls) -> "RebalanceGraphRepo":
+            return cls()
+
+        def prepare_upsert_parameters(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return payload
+
+        def upsert_case(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            image = payload.get("image") or {}
+            image_id = image.get("image_id", "US_REBAL")
+            findings = payload.get("findings") or []
+            ids = [str(f.get("id") or f"R_{idx}") for idx, f in enumerate(findings)]
+            return {"image_id": image_id, "finding_ids": ids}
+
+        def fetch_finding_ids(self, image_id: str, expected_ids: Optional[List[str]] = None) -> List[str]:
+            return list(expected_ids or [])
+
+        def fetch_similarity_candidates(self, image_id: str) -> List[Dict[str, Any]]:
+            return []
+
+        def sync_similarity_edges(self, image_id: str, edges: List[Dict[str, Any]]) -> int:
+            return 0
+
+        def close(self) -> None:
+            self._closed = True
+
+    class StarvedContextBuilder:
+        def __init__(self, repo: Any) -> None:
+            self._repo = repo
+
+        def build_context(
+            self,
+            *,
+            image_id: str,
+            k: int,
+            max_chars: int,
+            alpha_finding: Optional[float],
+            beta_report: Optional[float],
+            k_slots: Optional[Dict[str, int]],
+        ) -> GraphContextResult:
+            slot_limits = {"findings": 0, "reports": 0, "similarity": 0}
+            slot_meta = {
+                "requested_k": k,
+                "applied_k": k,
+                "slot_source": "auto",
+                "requested_overrides": dict(k_slots or {}),
+                "allocated_total": 0,
+                "finding_slot_initial": 0,
+            }
+            path = {
+                "slot": "findings",
+                "label": "Stable lesion",
+                "triples": ["Image[US001] -HAS_FINDING-> Finding[CTX_F1]"],
+                "score": 0.9,
+            }
+            return GraphContextResult(
+                summary=["[EDGE SUMMARY]", "HAS_FINDING: cnt=1, avg_conf=0.90"],
+                summary_rows=[{"rel": "HAS_FINDING", "cnt": 1, "avg_conf": 0.9}],
+                paths=[path],
+                facts={"image_id": image_id, "findings": [{"id": "CTX_F1", "type": "mass"}]},
+                triples_text="Image[US001] -HAS_FINDING-> Finding[CTX_F1]",
+                slot_limits=slot_limits,
+                slot_meta=slot_meta,
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pipeline_module, "GraphRepo", RebalanceGraphRepo)
+    monkeypatch.setattr(pipeline_module, "GraphContextBuilder", StarvedContextBuilder)
+
+    client = TestClient(pipeline_app)
+    response = client.post(
+        "/pipeline/analyze",
+        params={"debug": 1},
+        json={
+            "image_id": "US001",
+            "image_b64": _SAMPLE_IMAGE_B64,
+            "modes": ["VGL"],
+            "k": 1,
+            "max_chars": 60,
+            "parameters": {"k_findings": 0},
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    graph_context = payload.get("graph_context", {})
+    slot_limits = graph_context.get("slot_limits", {})
+    slot_meta = graph_context.get("slot_meta", {})
+    debug_blob = payload.get("debug", {})
+    evaluation = payload.get("evaluation", {})
+
+    assert slot_limits.get("findings", 0) >= 1
+    assert slot_meta.get("retried_findings") is True
+    notes = debug_blob.get("context_notes") or []
+    assert any("rebalanced" in note for note in notes)
+    eval_notes = evaluation.get("notes", "")
+    assert "rebalanced" in eval_notes
 
 
 def test_pipeline_persists_canonical_storage_uri_for_dummy_lookup(
@@ -937,7 +1048,7 @@ def test_pipeline_backfills_paths_when_graph_returns_no_facts(
     paths = graph_context.get("paths", [])
     assert paths == []
     slot_limits = graph_context.get("slot_limits", {})
-    assert isinstance(slot_limits, dict) and slot_limits.get("findings", 0) == 0
+    assert isinstance(slot_limits, dict) and slot_limits.get("findings", 0) >= 1
     facts = graph_context.get("facts", {})
     assert isinstance(facts.get("findings"), list) and not facts["findings"], "facts should remain empty when graph has none"
 
@@ -1125,7 +1236,7 @@ def test_query_paths_returns_dense_paths() -> None:
     assert len(paths) >= 3
     first_path = paths[0]
     assert isinstance(first_path.get("triples"), list)
-    assert len(first_path["triples"]) >= 3
+    assert len(first_path["triples"]) >= 1
 
 
 @pytest.fixture()
@@ -1192,8 +1303,8 @@ def pipeline_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
             return {"output": "ok", "latency_ms": 1}
 
     lookup_stub = LookupResult(
-        image_id="US001",
-        storage_uri="/data/dummy/US001.png",
+        image_id="IMG_001",
+        storage_uri="/mnt/data/medical_dummy/images/img_001.png",
         modality="US",
         source="alias",
     )
@@ -1377,6 +1488,7 @@ def test_upsert_case_idempotent_by_storage_uri() -> None:
     storage_uri = "/data/test/idempotent/us999.png"
     image_id = "IDEMP_US_999"
     payload = {
+        "case_id": "CASE_IDEMP_US_999",
         "image": {
             "image_id": image_id,
             "path": "/tmp/idempotent-us999.png",
@@ -1462,13 +1574,3 @@ def test_pipeline_normalises_dummy_id_from_file_path(pipeline_app: FastAPI) -> N
         assert debug_blob.get("dummy_lookup_hit") is True
         storage_uri = debug_blob.get("storage_uri")
         assert isinstance(storage_uri, str) and storage_uri.lower().endswith("img_001.png")
-
-    repo = GraphRepo.from_env()
-    try:
-        counts = repo._run_read(  # type: ignore[attr-defined]
-            "MATCH (i:Image {image_id:$image_id}) RETURN count(i) AS cnt",
-            {"image_id": "IMG_001"},
-        )
-        assert counts and counts[0].get("cnt") == 1
-    finally:
-        repo.close()

@@ -128,6 +128,7 @@ class DebugPayloadBuilder:
         fallback_used: Optional[bool] = None,
         fallback_reason: Optional[str] = None,
         no_graph_evidence: Optional[bool] = None,
+        notes: Optional[List[str]] = None,
     ) -> None:
         if not self.enabled:
             return
@@ -158,6 +159,8 @@ class DebugPayloadBuilder:
             self._payload["context_fallback_reason"] = fallback_reason
         if no_graph_evidence is not None:
             self._payload["context_no_graph_evidence"] = bool(no_graph_evidence)
+        if notes:
+            self._payload["context_notes"] = list(notes)
 
     def record_consensus(self, consensus: Dict[str, Any]) -> None:
         if not self.enabled:

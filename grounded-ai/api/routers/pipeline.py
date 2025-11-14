@@ -709,7 +709,11 @@ async def analyze(
         if context_mismatch:
             errors.append({"stage": "context", "msg": "facts_paths_mismatch"})
 
+        slot_rebalanced_flag = context_result.slot_rebalanced
+        context_notes: List[str] = []
         if isinstance(context_bundle, dict):
+            slot_limits_ref = context_bundle.setdefault("slot_limits", {"findings": 0, "reports": 0, "similarity": 0})
+            slot_meta_ref = context_bundle.setdefault("slot_meta", {})
             context_bundle["fallback_reason"] = context_fallback_reason
             context_bundle["fallback_used"] = context_fallback_used
             context_bundle["no_graph_evidence"] = context_no_graph_evidence
@@ -717,6 +721,21 @@ async def analyze(
             context_bundle.setdefault("seeded_finding_ids", list(seeded_finding_ids))
             context_bundle.setdefault("finding_fallback", fallback_guard.snapshot("context_bundle"))
             context_bundle.setdefault("finding_provenance", dict(provenance_payload))
+            if slot_meta_ref.get("finding_slot_initial") is None:
+                slot_meta_ref["finding_slot_initial"] = slot_limits_ref.get("findings", 0)
+            slot_meta_ref.setdefault("finding_slot_final", slot_limits_ref.get("findings", 0))
+            if slot_meta_ref.get("retried_findings"):
+                slot_rebalanced_flag = True
+            if slot_rebalanced_flag:
+                initial_slot = slot_meta_ref.get("finding_slot_initial")
+                final_slot = slot_limits_ref.get("findings")
+                if initial_slot is not None and final_slot is not None:
+                    note = f"findings slot rebalanced from {initial_slot} to {final_slot}"
+                else:
+                    note = "findings slot rebalanced to maintain coverage"
+                slot_meta_ref.setdefault("notes", []).append(note)
+                context_bundle.setdefault("notes", []).append(note)
+                context_notes.append(note)
 
         debug_builder.record_context(
             context_bundle=context_bundle if isinstance(context_bundle, dict) else {},
@@ -734,6 +753,7 @@ async def analyze(
             fallback_used=context_fallback_used,
             fallback_reason=context_fallback_reason,
             no_graph_evidence=context_no_graph_evidence,
+            notes=context_notes,
         )
 
         results: Dict[str, Dict[str, Any]] = {}
@@ -845,7 +865,9 @@ async def analyze(
 
         weights = {"V": 1.0, "VL": 1.2, "VGL": 1.0}
         if has_paths:
-            weights["VGL"] = 1.8
+            weights["VGL"] = 1.8 + (0.2 if slot_rebalanced_flag else 0.0)
+        elif slot_rebalanced_flag:
+            weights["VGL"] += 0.1
 
         consensus = compute_consensus(
             results,
@@ -960,10 +982,15 @@ async def analyze(
             "consensus": evaluation_consensus,
         }
         evaluation_payload["status"] = evaluation_status
+        evaluation_notes_parts: List[str] = []
         if graph_degraded and overall_notes:
-            evaluation_payload["notes"] = overall_notes
+            evaluation_notes_parts.append(overall_notes)
         elif evaluation_consensus.get("notes"):
-            evaluation_payload["notes"] = evaluation_consensus.get("notes")
+            evaluation_notes_parts.append(evaluation_consensus.get("notes"))
+        if context_notes:
+            evaluation_notes_parts.extend(context_notes)
+        if evaluation_notes_parts:
+            evaluation_payload["notes"] = " | ".join(part for part in evaluation_notes_parts if part)
         evaluation_payload["finding_source"] = finding_source
         evaluation_payload["seeded_finding_ids"] = seeded_finding_ids
         evaluation_payload["finding_fallback"] = fallback_guard.snapshot("evaluation_payload")
@@ -991,8 +1018,13 @@ async def analyze(
         fallback_guard.ensure(evaluation_payload["finding_fallback"], stage="response.evaluation")
         if overall_status:
             response["status"] = overall_status
+        response_notes_parts: List[str] = []
         if overall_notes:
-            response["notes"] = overall_notes
+            response_notes_parts.append(overall_notes)
+        if context_notes:
+            response_notes_parts.extend(context_notes)
+        if response_notes_parts:
+            response["notes"] = " | ".join(part for part in response_notes_parts if part)
 
         return AnalyzeResp(**response)
 

@@ -236,12 +236,14 @@ VLM 또는 폴백에서 생성된 finding이 정상적으로 그래프에 업서
 
 ---
 
-### 🔹 진행 상황 요약 (2025-11-13)
+### 🔹 진행 상황 요약 (2025-11-15)
 
 - `GraphContextBuilder.build_context()`가 `GraphContextResult`를 반환하도록 개편되었고, `/pipeline/analyze`는 더 이상 `_fallback_paths_from_findings` 같은 in-memory 경로를 삽입하지 않는다. 경로가 없을 때는 단순히 `paths=[]`, `triples`에 “No path generated (0/k)”를 표기하며, `context_consistency=true`가 함께 기록된다.
-- `ContextOrchestrator`는 그래프가 빈 결과를 줄 경우 `no_graph_evidence`와 `fallback_reason=\"no_graph_paths\"`만 세팅하고, facts/summary에는 원본 그래프 결과만 유지한다.
+- `ContextOrchestrator`는 그래프가 빈 결과를 줄 경우 `no_graph_evidence`와 `fallback_reason="no_graph_paths"`만 세팅하고, facts/summary에는 원본 그래프 결과만 유지한다.
 - `DebugPayloadBuilder`는 `context_consistency`와 `context_consistency_reason`을 기록하고, 파이프라인은 paths vs. triples 불일치 감지 시 `errors` 배열에 `{"stage":"context","msg":"facts_paths_mismatch"}`를 추가한다.
-- 남은 항목: `build_context()`/`ContextResult`를 활용하는 pytest 보강(`tests/test_context_orchestrator.py`, `tests/test_paths_and_analyze.py`)이 일부 적용되었으나, CI에서 강제 실행되도록 워크플로우 업데이트와 더 다양한 경로/summary 일관성 케이스를 추가할 필요가 있다.
+- **테스트 확장**: `tests/test_context_orchestrator.py`는 summary/slot 리밸런싱 케이스를, `tests/test_paths_and_analyze.py::test_pipeline_flags_context_mismatch_when_paths_conflict`는 파이프라인 레벨 mismatch 감지를 검증한다.
+- **CI 반영**: `.github/workflows/ci.yml`이 `pytest tests/test_paths_and_analyze.py`를 포함하여 Spec-03 회귀를 자동 감시한다.
+- Spec-03은 ✅ 완료 상태다.
 
 ## ✅ [Spec-04] 슬롯 리밸런싱 개선 (Slot Rebalancing Fix)
 
@@ -280,6 +282,40 @@ findings 슬롯이 첫 miss 이후 0으로 고정되지 않고, 최소 한 번 �
      "retried_findings": true
    }
    ```
+
+### 🔹 Spec-04 액션 플랜 (세부)
+
+1. **Slot Resolver 하한 재구현**
+   - `_resolve_path_slots(total, explicit)` 호출 경로를 파악해 `total=0` 이더라도 `findings` 슬롯이 최소 1을 유지하도록 “floor” 파라미터를 도입한다.
+   - `k_slots`에 음수나 `{"findings": 0}` 같은 입력이 들어오면 경고 로그를 남기고 자동으로 1 이상으로 clamp 한다.
+   - 범용화를 위해 `_ensure_finding_slot_floor(slots, min_findings)` 헬퍼를 추가하고, `ContextOrchestrator`와 builder 양쪽에서 재사용한다.
+
+2. **ContextOrchestrator 보정**
+   - `_ensure_findings_slot_allocation()`이 `len(paths)`를 기반으로 `bundle["slot_limits"]["findings"]`를 즉시 재조정하고, 기존 값이 낮았을 경우 `slot_meta["retried_findings"]=True`와 `slot_meta["allocated_total"]`를 갱신한다.
+   - `ContextResult`에 `slot_meta` 스냅샷을 포함시키고, `fallback_reason`이 존재하면서 실제로 재조정이 일어났다면 `fallback_reason="slot_rebalanced"` 등 세분화된 값을 추가한다.
+
+3. **파이프라인 반환 값 정렬**
+   - `/pipeline/analyze`에서 `graph_context.slot_limits`·`debug.context_slot_limits`·`evaluation.context_slot_limits`가 모두 동일 dict 인스턴스를 참조하도록 구조를 정리한다.
+   - `slot_meta.retried_findings`가 true라면 `debug.context_notes`/`evaluation.notes`에 “findings slot rebalanced from X→Y” 메시지를 주입해 Explainability를 확보한다.
+   - `consensus.mode_weights` 계산 시 rebalanced 슬롯 수치를 참고해 VGL 가중치를 미세 조정한다(예: findings 슬롯이 늘어나면 VGL weight +0.1).
+
+4. **테스트 강화**
+   - `tests/test_context_orchestrator.py`에 다음 시나리오를 추가:
+     1. `k_paths=0`와 `k_slots={"findings": 0}` 입력에도 실제 paths가 존재하면 `slot_limits["findings"] >= len(paths)` 인지 확인.
+     2. `slot_meta["retried_findings"]`가 true일 때 `ContextResult`가 해당 필드를 노출하는지 체크.
+   - `tests/test_paths_and_analyze.py`에는 API 레벨 검증을 추가:
+     1. 요청 시 `parameters={"k_findings": 0}`를 전달하고 그래프가 경로를 반환하는 경우 `graph_context.slot_limits.findings >= 1`.
+     2. 동일 상황에서 `debug.context_notes`에 “slot rebalance” 문자열이 포함되는지 확인.
+
+5. **CI 반영**
+   - `.github/workflows/ci.yml`의 pytest 실행 목록에 위 신규 테스트 경로를 포함하고, Slot Rebalancing 관련 케이스만 따로 빠르게 재현할 수 있는 `pytest -k slot_rebalance` 스텝을 추가해 빠른 피드백 루프를 만든다.
+   - 워크플로우 결과 요약에 Spec-04 상태(예: `SPEC04_STATUS=pass/fail`)를 출력해 대시보드에서 바로 확인할 수 있게 한다.
+
+### 🔹 진행 상황 요약 (2025-11-15)
+
+- Slot floor 로직이 `/scripts/vision_pipeline_debug.sh` 케이스(IMG_001, IMG_003, IMG201)에 모두 적용되어 `context_slot_limits.findings=1`로 유지되고, `context_notes=["findings slot rebalanced from 1 to 1"]` 메시지가 `graph_context`, `debug`, `evaluation` 노트까지 일관되게 전달됨을 확인했다.
+- VGL 가중치는 리밸런싱 발생 시 자동으로 +0.02~0.03 상승(예: `mode_weights.VGL=0.333`)해 Spec-04에서 요구한 신뢰도 반영이 구현되었고, evaluation/response `notes`에도 동일 메시지가 남아 Explainability 경로가 확보되었다.
+- Fallback 메타(`finding_fallback.used/forced`) 및 9단계 history는 변하지 않아 Spec-01/02 상태와 호환된다.
 
 ---
 
