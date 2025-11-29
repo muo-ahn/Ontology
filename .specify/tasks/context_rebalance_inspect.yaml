@@ -1,0 +1,68 @@
+version: "1.0"
+task:
+  id: context_rebalance_inspect
+  name: Context rebalance slot analysis (read-only)
+  description: >
+    Read-only analysis task to inspect how grounded-ai/api/services/context_pack.py allocates and rebalances
+    findings/report/similarity slots, cross-check the behavior against tests/test_context_rebalance.py and
+    docs/VisionPipelineDebug/*, and produce a single structured JSON report describing suspected causes of the
+    “findings slot becomes 0 and never recovers” issue, suspect implementation blocks, current test coverage,
+    and concrete follow-up actions. This task must not modify repository files.
+  labels: [analysis, read-only, debugging]
+  inputs:
+    files:
+      - grounded-ai/api/services/context_pack.py
+      - grounded-ai/api/services/context_orchestrator.py
+      - tests/test_context_rebalance.py
+      - tests/test_paths_and_analyze.py
+      - docs/VisionPipelineDebug/ConfirmedProblemScope.md
+      - docs/VisionPipelineDebug/ExpectedBehavior.md
+      - docs/VisionPipelineDebug/TicketPlan.md
+  plan:
+    - Outline inspection goals and expected JSON keys for the report.
+    - Extract slot allocation/rebalance logic from context_pack.py and note suspect branches/guards.
+    - Map how tests cover or miss those branches using tests/test_context_rebalance.py and related docs.
+    - Synthesize a single JSON report with findings and recommended next steps.
+  steps:
+    - id: outline
+      name: Establish inspection focus
+      type: analysis
+      description: Enumerate hypotheses and questions about slot allocation, rebalancing triggers, depletion/recovery conditions, and structure for the final JSON report (root_causes, suspect_blocks, test_coverage_gaps, next_actions).
+    - id: read_impl
+      name: Inspect implementation
+      type: llm
+      tools:
+        - read_file
+      inputs:
+        - grounded-ai/api/services/context_pack.py
+      description: Read context_pack.py to extract how findings/report/similarity slots are initialized, decremented, rebalanced, and reset; identify functions/blocks that could zero out findings slots and prevent recovery (caps, guards, early returns, mutating shared state).
+    - id: read_tests_and_docs
+      name: Cross-check tests and docs
+      type: llm
+      tools:
+        - read_file
+      inputs:
+        - tests/test_context_rebalance.py
+        - tests/test_paths_and_analyze.py
+        - docs/VisionPipelineDebug/ConfirmedProblemScope.md
+        - docs/VisionPipelineDebug/ExpectedBehavior.md
+        - docs/VisionPipelineDebug/TicketPlan.md
+      description: Relate test coverage and documented expectations to the implementation; note which scenarios reproduce or fail to cover the suspected failure modes.
+    - id: synthesize_report
+      name: Produce structured JSON report
+      type: llm
+      description: >
+        Generate a single JSON object with keys root_causes, suspect_blocks, test_coverage_gaps, and next_actions
+        grounded in the prior steps. Include file/function references and concise rationales. No code changes;
+        output should be textual/JSON only.
+      output:
+        format: json
+        schema:
+          root_causes: list
+          suspect_blocks: list
+          test_coverage_gaps: list
+          next_actions: list
+outputs:
+  artifacts:
+    - name: context_rebalance_inspect.json
+      description: JSON report containing root_causes, suspect_blocks, test_coverage_gaps, and next_actions derived from the read-only analysis.
